@@ -1,7 +1,7 @@
 /checkpoints
 /pretrained_weights
 /.venv
-/utils/message2lark.py
+**/message2lark.py
 
 **/nohup.out
 
