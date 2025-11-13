@@ -1,0 +1,13 @@
+/checkpoints
+/pretrained_weights
+/.venv
+/utils/message2lark.py
+
+**/nohup.out
+
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+**/wandb/
