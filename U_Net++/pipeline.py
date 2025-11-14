@@ -195,7 +195,7 @@ def main():
         scaler = torch.amp.GradScaler(enabled=(device.type == 'cuda'))
         
         # 创建检查点目录
-        checkpoint_dir = os.path.join("/home/songyufei/lancang/checkpoints", experiment_name)
+        checkpoint_dir = os.path.join("/home/rove/ThesisExp2026/checkpoints", experiment_name)
         os.makedirs(checkpoint_dir, exist_ok=True)
 
         # 本地日志配置
