@@ -30,37 +30,33 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def save_checkpoint(model, optimizer, epoch, iou, path, scaler=None):
+def save_checkpoint(model, optimizer, epoch, iou, path):
     state = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'best_iou': iou,
     }
-    if scaler:
-        state['scaler_state_dict'] = scaler.state_dict()
     
     torch.save(state, path)
 
-def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch, scaler):
+def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
     model.train()
     total_loss = 0.0
     iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
 
     pbar = tqdm(train_loader, desc=f"Training Epoch {epoch}")
     for batch_idx, batch in enumerate(pbar):
-        sar_imgs = batch["sar"].to(device)
-        opt_imgs = batch["opt"].to(device)
-        labels = batch["mask"].to(device)
+        images, labels = batch
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
 
         optimizer.zero_grad()
+        outputs = model(images) 
+        loss = loss_fc(outputs, labels)
         
-        with torch.autocast(device_type=device.type, dtype=torch.float16):
-            outputs = model(sar_imgs, opt_imgs)
-            loss = loss_fc(outputs, labels)
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        loss.backward()
+        optimizer.step()
 
         total_loss += loss.item()
 
@@ -96,13 +92,12 @@ def validate(model, val_loader, loss_fc, device, epoch):
     with torch.no_grad():
         pbar = tqdm(val_loader, desc=f"Validation Epoch {epoch}")
         for batch_idx, batch in enumerate(pbar):
-            sar_imgs = batch["sar"].to(device)
-            opt_imgs = batch["opt"].to(device)
-            labels = batch["mask"].to(device)
+            images, labels = batch
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
 
-            with torch.autocast(device_type=device.type, dtype=torch.float16):
-                outputs = model(sar_imgs, opt_imgs)
-                loss = loss_fc(outputs, labels)
+            outputs = model(images)
+            loss = loss_fc(outputs, labels)
 
             total_loss += loss.item()
 
@@ -147,14 +142,20 @@ def main():
 
     try:
         train_loader, val_loader = get_loaders(
-            root_dir = config["data_root'],
+            root_dir = config["data_root"],
             batch_size = config["batch_size"]
         )
 
         # 模型初始化
         model = Model(
-            in_channels = config["sar_channels"],
-            out_channels = config["num_classes"]
+            img_size=config.get('image_size', 256),
+            patch_size=config.get('patch_size', 16),
+            in_chans=config['in_channels'],
+            num_classes=config['num_classes'],
+            embed_dim=config.get('embed_dim', 768),
+            depth=config.get('depth', 6),
+            num_heads=config.get('num_heads', 12),
+            mlp_ratio=config.get('mlp_ratio', 4.0)
         )
         model = model.to(device)
         wandb.watch(model, log="all", log_freq=100)
@@ -191,11 +192,9 @@ def main():
             schedulers=[warmup_scheduler, cosine_scheduler],
             milestones=[config["warmup_epochs"]],
         )
-
-        scaler = torch.amp.GradScaler(enabled=(device.type == 'cuda'))
         
         # 创建检查点目录
-        checkpoint_dir = os.path.join("/home/rove/ThesisExp2026/checkpoints", experiment_name)
+        checkpoint_dir = os.path.join("/home/songyufei/lancang/checkpoints", experiment_name)
         os.makedirs(checkpoint_dir, exist_ok=True)
 
         # 本地日志配置
@@ -234,13 +233,9 @@ def main():
 
         for epoch in range(config["num_epochs"]):
             
-            train_loss, train_iou, train_precision, train_recall, train_f1 = train_one_epoch(
-                model, train_loader, optimizer, loss_fc, device, epoch + 1, scaler
-            )
+            train_loss, train_iou, train_precision, train_recall, train_f1 = train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch + 1)
 
-            val_loss, val_iou, val_precision, val_recall, val_f1 = validate(
-                model, val_loader, loss_fc, device, epoch + 1
-            )
+            val_loss, val_iou, val_precision, val_recall, val_f1 = validate(model, val_loader, loss_fc, device, epoch + 1)
 
             scheduler.step()
 
@@ -278,7 +273,7 @@ def main():
             #         plt.close(figure)
 
             if val_iou > best_iou:
-                if val_iou > 0.7 and val_iou - report_iou > 0.01:
+                if val_iou > 0.6 and val_iou - report_iou > 0.01:
                     report_iou = val_iou
                     elapsed = (datetime.now() - start_time).total_seconds()
                     eta_seconds = (elapsed / (epoch + 1)) * (config["num_epochs"] - (epoch + 1))
@@ -295,14 +290,14 @@ def main():
                     )
                 best_iou = val_iou
                 best_epoch = epoch + 1
-                save_checkpoint(model, optimizer, epoch, best_iou, best_model_path, scaler)
+                save_checkpoint(model, optimizer, epoch, best_iou, best_model_path)
                 logging.info(f"New best model saved at epoch {best_epoch} with IoU: {best_iou:.4f}")
 
             if (epoch + 1) % 10 == 0 and epoch > 100:
                 checkpoint_path = os.path.join(
                     checkpoint_dir, f"checkpoint_epoch_{epoch+1}.pth"
                 )
-                save_checkpoint(model, optimizer, epoch, best_iou, checkpoint_path, scaler)
+                save_checkpoint(model, optimizer, epoch, best_iou, checkpoint_path)
 
         wandb.summary["best_iou"] = best_iou
         wandb.summary["best_epoch"] = best_epoch
@@ -310,8 +305,6 @@ def main():
         if os.path.exists(best_model_path):
             checkpoint = torch.load(best_model_path, map_location=device)
             model.load_state_dict(checkpoint["model_state_dict"])
-
-            # 清理训练过程中的临时检查点
             logging.info("训练成功，开始清理临时检查点...")
             for filename in os.listdir(checkpoint_dir):
                 if filename.startswith("checkpoint_epoch_") and filename.endswith(".pth"):
@@ -322,15 +315,6 @@ def main():
                     except OSError as e:
                         logging.error(f"删除文件 {file_to_delete} 时出错: {e}")
 
-        _, test_iou, test_precision, test_recall, test_f1 = validate(model, test_loader, loss_fc, device, epoch + 1)
-        wandb.log(
-            {
-                "Result Board/IoU": test_iou,
-                "Result Board/F1": test_f1,
-                "Result Board/Precision": test_precision,
-                "Result Board/Recall": test_recall
-            }
-        )
         logging.info(
             f"Test results - IoU: {test_iou:.4f}, F1: {test_f1:.4f}"
         )

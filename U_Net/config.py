@@ -3,19 +3,19 @@ config = {
     'device': 'cuda',
 
     'data_root': '/mnt/sda1/songyufei/dataset/lancang',
-    'batch_size': 8,
+    'batch_size': 4,
     'num_workers': 4,
 
     'model_name': 'U_Net',
     'sar_channels': 1,
     'num_classes': 1,
-    'use_bilinear': True,
-    'image_size': 512,
+    'use_bilinear': False,
+    'image_size': 256,
 
-    'learning_rate': 3e-4,
+    'learning_rate': 5e-4,
     'min_lr': 1e-6,
     'weight_decay': 1e-3,
-    'num_epochs': 200,
+    'num_epochs': 150,
     'warmup_epochs': 5,
 
     

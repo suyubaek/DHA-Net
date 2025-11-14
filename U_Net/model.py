@@ -71,13 +71,13 @@ class OutConv(nn.Module):
         return self.conv(x)
 
 # --- 这是新的 Model 类 (标准的 U-Net) ---
-# 它现在只接收 in_channels (你的SAR是1) 和 n_classes (你的水体是1)
+# 它现在只接收 in_channels (你的SAR是1) 和 out_channels (你的水体是1)
 
 class Model(nn.Module):
-    def __init__(self, in_channels, n_classes, bilinear=False):
+    def __init__(self, in_channels, out_channels, bilinear=False):
         super(Model, self).__init__()
         self.in_channels = in_channels
-        self.n_classes = n_classes
+        self.out_channels = out_channels
         self.bilinear = bilinear
 
         self.inc = DoubleConv(in_channels, 64)
@@ -90,7 +90,7 @@ class Model(nn.Module):
         self.up2 = Up(512, 256 // factor, bilinear)
         self.up3 = Up(256, 128 // factor, bilinear)
         self.up4 = Up(128, 64, bilinear)
-        self.outc = OutConv(64, n_classes)
+        self.outc = OutConv(64, out_channels)
 
     def forward(self, x):
         # 注意：forward 现在只接收一个输入 x (即你的SAR影像)
