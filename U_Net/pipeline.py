@@ -15,7 +15,7 @@ import wandb
 
 from model import Model
 from loss_function import DiceBCELoss
-from dataprocess import create_whuoptsar_dataloader
+from dataprocess import get_loaders
 from config import config
 from metrics import calculate_metrics
 from message2lark import send_message
