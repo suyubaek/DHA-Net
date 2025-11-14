@@ -181,7 +181,8 @@ class Model(nn.Module):
                  embed_dim: int = 768, 
                  depth: int = 6, 
                  num_heads: int = 12, 
-                 mlp_ratio: float = 4.0):
+                 mlp_ratio: float = 4.0,
+                 contrastive_feature_dim = 64):
         super().__init__()
 
         self.transformer_encoder = TransformerEncoder(
@@ -205,8 +206,20 @@ class Model(nn.Module):
         
         self.outc = nn.Conv2d(self.decoder_channels[3], num_classes, kernel_size=1)
 
+        self.contrastive_feature_dim = contrastive_feature_dim
+        self.contrastive_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Linear(embed_dim // 2, self.contrastive_feature_dim)
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         feat = self.transformer_encoder(x)
+
+        B, C, H, W = feat.shape
+        feat_flat = feat.flatten(2)
+        global_emb = F.adaptive_avg_pool1d(feat_flat, 1).squeeze(2)
+        contrastive_emb = self.contrastive_head(global_emb)
 
         d = self.decoder_proj(feat)
         d = self.up1(d)
@@ -215,4 +228,4 @@ class Model(nn.Module):
         d = self.up4(d)
 
         logits = self.outc(d)
-        return logits
+        return logits, contrastive_emb

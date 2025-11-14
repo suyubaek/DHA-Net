@@ -14,7 +14,7 @@ from tqdm import tqdm
 import wandb
 
 from model import Model
-from loss_function import DiceBCELoss
+from loss_function import CombinedLoss, DiceBCELoss
 from dataprocess import get_loaders
 from config import config
 from metrics import calculate_metrics
@@ -42,25 +42,28 @@ def save_checkpoint(model, optimizer, epoch, iou, path):
 
 def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
     model.train()
-    total_loss = 0.0
+    total_loss, seg_loss_total, con_loss_total = 0.0, 0.0, 0.0
     iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
 
     pbar = tqdm(train_loader, desc=f"Training Epoch {epoch}")
     for batch_idx, batch in enumerate(pbar):
-        images, labels = batch
+        images, labels, class_labels = batch
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
+        class_labels = class_labels.to(device, non_blocking=True)
 
         optimizer.zero_grad()
-        outputs = model(images) 
-        loss = loss_fc(outputs, labels)
+        seg_logits, con_emb = model(images) 
+        loss, loss_components = loss_fc(seg_logits, con_emb, labels, class_labels)
         
         loss.backward()
         optimizer.step()
 
         total_loss += loss.item()
+        seg_loss_total += loss_components['seg'].item()
+        con_loss_total += loss_components['con'].item()
 
-        outputs = outputs.detach().cpu()
+        outputs = torch.sigmoid(seg_logits).detach().cpu()
         labels = labels.cpu()
         cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels)
         iou += cur_iou
@@ -71,20 +74,23 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
         pbar.set_postfix(
             {
                 "Loss": f"{loss.item():.4f}",
-                "Avg": f"{total_loss / (batch_idx + 1):.4f}",
+                "Seg_L": f"{loss_components['seg']:.4f}",
+                "Con_L": f"{loss_components['con']:.4f}",
             }
         )
-
+    
     avg_loss = total_loss / len(train_loader)
+    avg_seg_loss = seg_loss_total / len(train_loader)
+    avg_con_loss = con_loss_total / len(train_loader)
     iou /= len(train_loader)
     precision /= len(train_loader)
     recall /= len(train_loader)
     f1 /= len(train_loader)
 
-    return avg_loss, iou, precision, recall, f1
+    return avg_loss, avg_seg_loss, avg_con_loss, iou, precision, recall, f1
 
 
-def validate(model, val_loader, loss_fc, device, epoch):
+def validate(model, val_loader, loss_fc_seg, device, epoch):
     model.eval()
     total_loss = 0.0
     iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
@@ -92,16 +98,17 @@ def validate(model, val_loader, loss_fc, device, epoch):
     with torch.no_grad():
         pbar = tqdm(val_loader, desc=f"Validation Epoch {epoch}")
         for batch_idx, batch in enumerate(pbar):
-            images, labels = batch
+            images, labels, _ = batch
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
 
-            outputs = model(images)
-            loss = loss_fc(outputs, labels)
+            seg_logits, _ = model(images)
+        
+            loss = loss_fc_seg(seg_logits, labels)
 
             total_loss += loss.item()
 
-            outputs = outputs.detach().cpu()
+            outputs = torch.sigmoid(seg_logits).detach().cpu()
             labels = labels.cpu()
             cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels)
             iou += cur_iou
@@ -137,7 +144,7 @@ def main():
         project="LanCang River",
         name=experiment_name,
         config=config,
-        tags=["UNet"],
+        tags=["HTCC"],
     )
 
     try:
@@ -229,13 +236,24 @@ def main():
         best_iou, report_iou = 0.0, 0.0
         best_epoch = -1
         best_model_path = os.path.join(checkpoint_dir, "best_model.pth")
-        loss_fc = DiceBCELoss()
+        loss_fc_train = CombinedLoss(
+            contrastive_lambda=0.3,
+            con_temperature=0.07
+        ).to(device)
+        loss_fc_val = DiceBCELoss()
 
         for epoch in range(config["num_epochs"]):
             
-            train_loss, train_iou, train_precision, train_recall, train_f1 = train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch + 1)
+            train_loss, train_seg_loss, train_con_loss, \
+            train_iou, train_precision, train_recall, train_f1 = train_one_epoch(
+                model, train_loader, optimizer, 
+                loss_fc_train, 
+                device, epoch + 1
+            )
 
-            val_loss, val_iou, val_precision, val_recall, val_f1 = validate(model, val_loader, loss_fc, device, epoch + 1)
+            val_loss, val_iou, val_precision, val_recall, val_f1 = validate(
+                model, val_loader, loss_fc_val, device, epoch + 1
+            )
 
             scheduler.step()
 
@@ -315,13 +333,9 @@ def main():
                     except OSError as e:
                         logging.error(f"删除文件 {file_to_delete} 时出错: {e}")
 
-        logging.info(
-            f"Test results - IoU: {test_iou:.4f}, F1: {test_f1:.4f}"
-        )
-        
         send_message(
             title=f"实验结束: {experiment_name}",
-            content=f"训练完成!\n最佳 Val IoU: {best_iou:.4f} (at epoch {best_epoch})\n测试集 IoU: {test_iou:.4f}",
+            content=f"训练完成!\n最佳 Val IoU: {best_iou:.4f} (at epoch {best_epoch})",
         )
 
     except Exception as exc:

@@ -72,6 +72,15 @@ class WaterDataset(Dataset):
         if np.max(mask) > 1.0:
             mask = mask / 255.0
         
+        water_content = np.mean(mask)
+        
+        if water_content == 0.0:
+            class_label = 0 # 纯背景
+        elif water_content == 1.0:
+            class_label = 1 # 纯水体
+        else:
+            class_label = 2 # 混合区域 (0.0 < content < 1.0)
+        
         # 确保 mask 是 float32，以便 PyTorch 正确处理
         mask = mask.astype(np.float32)
         
@@ -85,7 +94,7 @@ class WaterDataset(Dataset):
         #    这对于 (B, C, H, W) 格式的分割损失函数至关重要
         mask = mask.unsqueeze(0)
         
-        return image, mask
+        return image, mask, torch.tensor(class_label, dtype=torch.long)
 
 
 def get_loaders(root_dir, batch_size, num_workers=4, pin_memory=True):
@@ -139,7 +148,7 @@ if __name__ == "__main__":
         print("\n--- 正在测试从 Train Loader 取一个批次... ---")
         
         # 从 train_loader 取一个 batch
-        images, masks = next(iter(train_loader))
+        images, masks, class_labels = next(iter(train_loader))
         
         # 打印这个 batch 的信息
         print(f"  影像批次形状 (B, C, H, W): {images.shape}")

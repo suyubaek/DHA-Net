@@ -60,7 +60,7 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
 
         total_loss += loss.item()
 
-        outputs = outputs.detach().cpu()
+        outputs = torch.sigmoid(outputs).detach().cpu()
         labels = labels.cpu()
         cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels)
         iou += cur_iou
@@ -101,7 +101,7 @@ def validate(model, val_loader, loss_fc, device, epoch):
 
             total_loss += loss.item()
 
-            outputs = outputs.detach().cpu()
+            outputs = torch.sigmoid(outputs).detach().cpu()
             labels = labels.cpu()
             cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels)
             iou += cur_iou
