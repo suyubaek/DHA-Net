@@ -90,23 +90,25 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
     return avg_loss, avg_seg_loss, avg_con_loss, iou, precision, recall, f1
 
 
-def validate(model, val_loader, loss_fc_seg, device, epoch):
+def validate(model, val_loader, loss_fc, device, epoch):
     model.eval()
-    total_loss = 0.0
+    total_loss, seg_loss_total, con_loss_total = 0.0, 0.0, 0.0
     iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
 
     with torch.no_grad():
         pbar = tqdm(val_loader, desc=f"Validation Epoch {epoch}")
         for batch_idx, batch in enumerate(pbar):
-            images, labels, _ = batch
+            images, labels, class_labels = batch
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
+            class_labels = class_labels.to(device, non_blocking=True)
 
-            seg_logits, _ = model(images)
-        
-            loss = loss_fc_seg(seg_logits, labels)
+            seg_logits, con_emb = model(images) 
+            loss, loss_components = loss_fc(seg_logits, con_emb, labels, class_labels)
 
             total_loss += loss.item()
+            seg_loss_total += loss_components['seg'].item()
+            con_loss_total += loss_components['con'].item()
 
             outputs = torch.sigmoid(seg_logits).detach().cpu()
             labels = labels.cpu()
@@ -119,17 +121,19 @@ def validate(model, val_loader, loss_fc_seg, device, epoch):
             pbar.set_postfix(
                 {
                     "Loss": f"{loss.item():.4f}",
-                    "Avg": f"{total_loss / (batch_idx + 1):.4f}",
+                    "Seg_L": f"{loss_components['seg']:.4f}",
+                    "Con_L": f"{loss_components['con']:.4f}",
                 }
             )
-
     avg_loss = total_loss / len(val_loader)
+    avg_seg_loss = seg_loss_total / len(val_loader)
+    avg_con_loss = con_loss_total / len(val_loader)
     iou /= len(val_loader)
     precision /= len(val_loader)
     recall /= len(val_loader)
     f1 /= len(val_loader)
 
-    return avg_loss, iou, precision, recall, f1
+    return avg_loss, avg_seg_loss, avg_con_loss, iou, precision, recall, f1
 
 
 def main():
@@ -236,23 +240,21 @@ def main():
         best_iou, report_iou = 0.0, 0.0
         best_epoch = -1
         best_model_path = os.path.join(checkpoint_dir, "best_model.pth")
-        loss_fc_train = CombinedLoss(
+        loss_fc = CombinedLoss(
             contrastive_lambda=0.3,
             con_temperature=0.07
         ).to(device)
-        loss_fc_val = DiceBCELoss()
 
         for epoch in range(config["num_epochs"]):
             
             train_loss, train_seg_loss, train_con_loss, \
             train_iou, train_precision, train_recall, train_f1 = train_one_epoch(
-                model, train_loader, optimizer, 
-                loss_fc_train, 
-                device, epoch + 1
+                model, train_loader, optimizer, loss_fc, device, epoch + 1
             )
 
-            val_loss, val_iou, val_precision, val_recall, val_f1 = validate(
-                model, val_loader, loss_fc_val, device, epoch + 1
+            val_loss, val_seg_loss, val_con_loss, \
+            val_iou, val_precision, val_recall, val_f1 = validate(
+                model, val_loader, loss_fc, device, epoch + 1
             )
 
             scheduler.step()
@@ -267,6 +269,10 @@ def main():
 
                     "Train_info/Loss/Train": train_loss,
                     "Train_info/Loss/Val": val_loss,
+                    "Train_info/Seg_Loss/Train": train_seg_loss,
+                    "Train_info/Seg_Loss/Val": val_seg_loss,
+                    "Train_info/Con_Loss/Train": train_con_loss,
+                    "Train_info/Con_Loss/Val": val_con_loss,
                     "Train_info/IoU/Train": train_iou,
                     "Train_info/IoU/Val": val_iou,
                     "Train_info/F1/Train": train_f1,

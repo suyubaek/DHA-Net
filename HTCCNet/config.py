@@ -18,11 +18,11 @@ config = {
     'num_heads': 6,
     'mlp_ratio': 4.0,
 
-    'learning_rate': 5e-4,
+    'learning_rate': 3e-4,
     'min_lr': 1e-6,
     'weight_decay': 1e-3,
     'num_epochs': 200,
-    'warmup_epochs': 5,
+    'warmup_epochs': 10,
 
     'save_dir': './runs'
 }

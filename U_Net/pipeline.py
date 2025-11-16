@@ -268,7 +268,7 @@ def main():
             #         plt.close(figure)
 
             if val_iou > best_iou:
-                if val_iou > 0.6 and val_iou - report_iou > 0.01:
+                if val_iou > 0.8 and val_iou - report_iou > 0.01:
                     report_iou = val_iou
                     elapsed = (datetime.now() - start_time).total_seconds()
                     eta_seconds = (elapsed / (epoch + 1)) * (config["num_epochs"] - (epoch + 1))
@@ -309,14 +309,10 @@ def main():
                         logging.info(f"已删除临时检查点: {file_to_delete}")
                     except OSError as e:
                         logging.error(f"删除文件 {file_to_delete} 时出错: {e}")
-
-        logging.info(
-            f"Test results - IoU: {test_iou:.4f}, F1: {test_f1:.4f}"
-        )
         
         send_message(
             title=f"实验结束: {experiment_name}",
-            content=f"训练完成!\n最佳 Val IoU: {best_iou:.4f} (at epoch {best_epoch})\n测试集 IoU: {test_iou:.4f}",
+            content=f"训练完成!\n最佳 Val IoU: {best_iou:.4f} (at epoch {best_epoch})",
         )
 
     except Exception as exc:
