@@ -1,4 +1,4 @@
-from typing import Optional, Sequence
+from typing import Dict, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -144,46 +144,55 @@ class SupervisedContrastiveLoss(nn.Module):
 
 
 class CombinedLoss(nn.Module):
-    def __init__(self, contrastive_lambda=0.1, con_temperature=0.07):
+    def __init__(
+        self,
+        align_lambda: float = 0.1,
+        cls_lambda: float = 0.1,
+        con_temperature: float = 0.07,
+    ) -> None:
         """
-        聚合分割损失和对比损失
+        组合分割、对齐、分类三种损失
         Args:
-            contrastive_lambda (float): 对比损失的权重
-            con_temperature (float): SupCon 损失的温度参数
+            align_lambda: 对齐损失权重
+            cls_lambda: 分类损失权重
+            con_temperature: SupCon 温度
         """
         super().__init__()
-        self.contrastive_lambda = contrastive_lambda
-        
-        # 1. 实例化各个子损失
-        self.loss_seg = DiceBCELoss()
-        self.loss_con = SupervisedContrastiveLoss(temperature=con_temperature)
+        self.align_lambda = align_lambda
+        self.cls_lambda = cls_lambda
 
-    def forward(self, seg_logits, con_emb, seg_labels, con_labels):
+        self.loss_seg = DiceBCELoss()
+        self.loss_align = SupervisedContrastiveLoss(temperature=con_temperature)
+        self.loss_cls = CrossEntropyLoss()
+
+    def forward(
+        self,
+        seg_logits: torch.Tensor,
+        align_emb: torch.Tensor,
+        cls_logits: torch.Tensor,
+        seg_labels: torch.Tensor,
+        align_labels: torch.Tensor,
+        cls_labels: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
-        计算所有损失并返回
         Args:
-            seg_logits: 来自模型的分割输出 (B, 1, H, W)
-            con_emb: 来自模型的对比嵌入 (B, C_con)
-            seg_labels: 真实的分割掩码 (B, 1, H, W)
-            con_labels: 真实的类别标签 (B,)
-        
-        Returns:
-            total_loss (torch.Tensor): 用于反向传播的总损失
-            loss_components (dict): 包含各个子损失的字典，用于 logging
+            seg_logits: (B, 1, H, W)
+            align_emb: (B, C) —— CLS embedding
+            cls_logits: (B, num_classes)
+            seg_labels: (B, 1, H, W)
+            align_labels: (B,)
+            cls_labels: (B,)
         """
-        
-        # 1. 计算各个损失
         loss_seg = self.loss_seg(seg_logits, seg_labels)
-        loss_con = self.loss_con(con_emb, con_labels)
-        
-        # 2. 加权求和
-        total_loss = loss_seg + self.contrastive_lambda * loss_con
-        
-        # 3. 准备一个字典用于日志记录
+        loss_align = self.loss_align(align_emb, align_labels)
+        loss_cls = self.loss_cls(cls_logits, cls_labels)
+
+        total_loss = loss_seg + self.align_lambda * loss_align + self.cls_lambda * loss_cls
+
         loss_components = {
             "total": total_loss,
             "seg": loss_seg,
-            "con": loss_con
+            "align": loss_align,
+            "cls": loss_cls,
         }
-        
         return total_loss, loss_components

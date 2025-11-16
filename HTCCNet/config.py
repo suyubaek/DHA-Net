@@ -1,27 +1,29 @@
 config = {
-    'seed': 42,
+    'seed': 3047,
     'device': 'cuda',
 
-    'data_root': '/mnt/sda1/songyufei/dataset/lancang',
-    'batch_size': 6,
+    'data_root': '/mnt/data1/rove/dataset/S1_Water',
+    'batch_size': 48,
     'num_workers': 4,
 
     'model_name': 'Hybrid TransCNN',
-    'in_channels': 1,
+    'in_channels': 2,
     'num_classes': 1,
     'use_bilinear': True,
     'image_size': 256,
     'patch_size': 16,
 
     'embed_dim': 768,   
-    'depth': 4,            
+    'depth': 3,            
     'num_heads': 6,
     'mlp_ratio': 4.0,
+    'align_lambda': 0.0,
+    'cls_lambda': 1.0,
 
-    'learning_rate': 3e-4,
+    'learning_rate': 5e-4,
     'min_lr': 1e-6,
     'weight_decay': 1e-3,
-    'num_epochs': 200,
+    'num_epochs': 500,
     'warmup_epochs': 10,
 
     'save_dir': './runs'

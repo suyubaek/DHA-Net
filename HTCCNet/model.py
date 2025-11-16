@@ -117,7 +117,8 @@ class TransformerEncoder(nn.Module):
         self.patch_embed = PatchEmbedding(img_size, patch_size, in_chans, embed_dim)
         
         num_patches = (img_size // patch_size) * (img_size // patch_size)
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
         
         self.pos_drop = nn.Dropout(p=drop_rate)
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
@@ -141,18 +142,23 @@ class TransformerEncoder(nn.Module):
 
     def forward(self, x):
         B, C, H, W = x.shape
-        x = self.patch_embed(x) # (B, N, C) N = (256/16 * 256/16) = 256
-        x += self.pos_embed
+        x = self.patch_embed(x)
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x = x + self.pos_embed
         x = self.pos_drop(x)
         
         for block in self.blocks:
             x = block(x)
         
         x = self.norm(x)
+
+        cls_feat = x[:, 0]
+        patch_tokens = x[:, 1:]
         
         patch_h, patch_w = H // self.patch_size, W // self.patch_size
-        x = x.transpose(1, 2).reshape(B, -1, patch_h, patch_w)
-        return x
+        patch_tokens = patch_tokens.transpose(1, 2).reshape(B, -1, patch_h, patch_w)
+        return patch_tokens, cls_feat
 
 
 class CBAMUpBlock(nn.Module):
@@ -212,14 +218,13 @@ class Model(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(embed_dim // 2, self.contrastive_feature_dim)
         )
+        self.cls_head = nn.Linear(embed_dim, 3)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        feat = self.transformer_encoder(x)
+    def forward(self, x: torch.Tensor):
+        feat, cls_feat = self.transformer_encoder(x)
 
-        B, C, H, W = feat.shape
-        feat_flat = feat.flatten(2)
-        global_emb = F.adaptive_avg_pool1d(feat_flat, 1).squeeze(2)
-        contrastive_emb = self.contrastive_head(global_emb)
+        con_emb = cls_feat
+        cls_logits = self.cls_head(cls_feat)
 
         d = self.decoder_proj(feat)
         d = self.up1(d)
@@ -228,4 +233,4 @@ class Model(nn.Module):
         d = self.up4(d)
 
         logits = self.outc(d)
-        return logits, contrastive_emb
+        return logits, con_emb, cls_logits

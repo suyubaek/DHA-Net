@@ -142,8 +142,11 @@ def main():
 
     try:
         train_loader, val_loader = get_loaders(
-            root_dir = config["data_root"],
-            batch_size = config["batch_size"]
+            data_dir=config["data_root"],
+            batch_size=config["batch_size"],
+            num_workers=config["num_workers"],
+            neg_sample_ratio=0.3,
+            seed=config["seed"],
         )
 
         # 模型初始化
@@ -189,7 +192,7 @@ def main():
         )
         
         # 创建检查点目录
-        checkpoint_dir = os.path.join("/home/songyufei/lancang/checkpoints", experiment_name)
+        checkpoint_dir = os.path.join("/home/rove/lancing/ckeckpoints", experiment_name)
         os.makedirs(checkpoint_dir, exist_ok=True)
 
         # 本地日志配置

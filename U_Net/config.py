@@ -2,12 +2,12 @@ config = {
     'seed': 42,
     'device': 'cuda',
 
-    'data_root': '/mnt/sda1/songyufei/dataset/lancang',
-    'batch_size': 16,
-    'num_workers': 4,
+    'data_root': '/mnt/data1/rove/dataset/S1_Water',
+    'batch_size': 32,
+    'num_workers': 8,
 
     'model_name': 'U_Net',
-    'sar_channels': 1,
+    'sar_channels': 2,
     'num_classes': 1,
     'use_bilinear': False,
     'image_size': 256,

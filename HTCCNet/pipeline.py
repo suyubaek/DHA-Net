@@ -42,7 +42,7 @@ def save_checkpoint(model, optimizer, epoch, iou, path):
 
 def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
     model.train()
-    total_loss, seg_loss_total, con_loss_total = 0.0, 0.0, 0.0
+    total_loss = seg_loss_total = align_loss_total = cls_loss_total = 0.0
     iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
 
     pbar = tqdm(train_loader, desc=f"Training Epoch {epoch}")
@@ -53,15 +53,24 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
         class_labels = class_labels.to(device, non_blocking=True)
 
         optimizer.zero_grad()
-        seg_logits, con_emb = model(images) 
-        loss, loss_components = loss_fc(seg_logits, con_emb, labels, class_labels)
+        seg_logits, align_emb, cls_logits = model(images)
+        loss, loss_components = loss_fc(
+            seg_logits=seg_logits,
+            align_emb=align_emb,
+            cls_logits=cls_logits,
+            seg_labels=labels,
+            align_labels=class_labels,
+            cls_labels=class_labels,
+        )
         
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
         total_loss += loss.item()
-        seg_loss_total += loss_components['seg'].item()
-        con_loss_total += loss_components['con'].item()
+        seg_loss_total += loss_components["seg"].item()
+        align_loss_total += loss_components["align"].item()
+        cls_loss_total += loss_components["cls"].item()
 
         outputs = torch.sigmoid(seg_logits).detach().cpu()
         labels = labels.cpu()
@@ -75,24 +84,34 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
             {
                 "Loss": f"{loss.item():.4f}",
                 "Seg_L": f"{loss_components['seg']:.4f}",
-                "Con_L": f"{loss_components['con']:.4f}",
+                "Align_L": f"{loss_components['align']:.4f}",
+                "Cls_L": f"{loss_components['cls']:.4f}",
             }
         )
     
     avg_loss = total_loss / len(train_loader)
     avg_seg_loss = seg_loss_total / len(train_loader)
-    avg_con_loss = con_loss_total / len(train_loader)
+    avg_align_loss = align_loss_total / len(train_loader)
+    avg_cls_loss = cls_loss_total / len(train_loader)
     iou /= len(train_loader)
     precision /= len(train_loader)
     recall /= len(train_loader)
     f1 /= len(train_loader)
 
-    return avg_loss, avg_seg_loss, avg_con_loss, iou, precision, recall, f1
-
+    return (
+        avg_loss,
+        avg_seg_loss,
+        avg_align_loss,
+        avg_cls_loss,
+        iou,
+        precision,
+        recall,
+        f1,
+    )
 
 def validate(model, val_loader, loss_fc, device, epoch):
     model.eval()
-    total_loss, seg_loss_total, con_loss_total = 0.0, 0.0, 0.0
+    total_loss = seg_loss_total = align_loss_total = cls_loss_total = 0.0
     iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
 
     with torch.no_grad():
@@ -103,12 +122,20 @@ def validate(model, val_loader, loss_fc, device, epoch):
             labels = labels.to(device, non_blocking=True)
             class_labels = class_labels.to(device, non_blocking=True)
 
-            seg_logits, con_emb = model(images) 
-            loss, loss_components = loss_fc(seg_logits, con_emb, labels, class_labels)
+            seg_logits, align_emb, cls_logits = model(images) 
+            loss, loss_components = loss_fc(
+                seg_logits=seg_logits,
+                align_emb=align_emb,
+                cls_logits=cls_logits,
+                seg_labels=labels,
+                align_labels=class_labels,
+                cls_labels=class_labels,
+            )
 
             total_loss += loss.item()
-            seg_loss_total += loss_components['seg'].item()
-            con_loss_total += loss_components['con'].item()
+            seg_loss_total += loss_components["seg"].item()
+            align_loss_total += loss_components["align"].item()
+            cls_loss_total += loss_components["cls"].item()
 
             outputs = torch.sigmoid(seg_logits).detach().cpu()
             labels = labels.cpu()
@@ -122,18 +149,29 @@ def validate(model, val_loader, loss_fc, device, epoch):
                 {
                     "Loss": f"{loss.item():.4f}",
                     "Seg_L": f"{loss_components['seg']:.4f}",
-                    "Con_L": f"{loss_components['con']:.4f}",
+                    "Align_L": f"{loss_components['align']:.4f}",
+                    "Cls_L": f"{loss_components['cls']:.4f}",
                 }
             )
     avg_loss = total_loss / len(val_loader)
     avg_seg_loss = seg_loss_total / len(val_loader)
-    avg_con_loss = con_loss_total / len(val_loader)
+    avg_align_loss = align_loss_total / len(val_loader)
+    avg_cls_loss = cls_loss_total / len(val_loader)
     iou /= len(val_loader)
     precision /= len(val_loader)
     recall /= len(val_loader)
     f1 /= len(val_loader)
 
-    return avg_loss, avg_seg_loss, avg_con_loss, iou, precision, recall, f1
+    return (
+        avg_loss,
+        avg_seg_loss,
+        avg_align_loss,
+        avg_cls_loss,
+        iou,
+        precision,
+        recall,
+        f1,
+    )
 
 
 def main():
@@ -153,8 +191,11 @@ def main():
 
     try:
         train_loader, val_loader = get_loaders(
-            root_dir = config["data_root"],
-            batch_size = config["batch_size"]
+            data_dir=config["data_root"],
+            batch_size=config["batch_size"],
+            num_workers=config["num_workers"],
+            neg_sample_ratio=0.3,
+            seed=config["seed"],
         )
 
         # 模型初始化
@@ -205,7 +246,7 @@ def main():
         )
         
         # 创建检查点目录
-        checkpoint_dir = os.path.join("/home/songyufei/lancang/checkpoints", experiment_name)
+        checkpoint_dir = os.path.join("/home/rove/ThesisExp2026/checkpoints", experiment_name)
         os.makedirs(checkpoint_dir, exist_ok=True)
 
         # 本地日志配置
@@ -241,25 +282,25 @@ def main():
         best_epoch = -1
         best_model_path = os.path.join(checkpoint_dir, "best_model.pth")
         loss_fc = CombinedLoss(
-            contrastive_lambda=0.3,
-            con_temperature=0.07
+            align_lambda=config.get("align_lambda", 0.1),
+            cls_lambda=config.get("cls_lambda", 0.1),
+            con_temperature=config.get("con_temperature", 0.07),
         ).to(device)
 
         for epoch in range(config["num_epochs"]):
             
-            train_loss, train_seg_loss, train_con_loss, \
+            train_loss, train_seg_loss, train_align_loss, train_cls_loss, \
             train_iou, train_precision, train_recall, train_f1 = train_one_epoch(
                 model, train_loader, optimizer, loss_fc, device, epoch + 1
             )
 
-            val_loss, val_seg_loss, val_con_loss, \
+            val_loss, val_seg_loss, val_align_loss, val_cls_loss, \
             val_iou, val_precision, val_recall, val_f1 = validate(
                 model, val_loader, loss_fc, device, epoch + 1
             )
 
             scheduler.step()
 
-            # 使用 wandb.log 记录训练和验证指标
             wandb.log(
                 {   
                     "Comparison Board/IoU": val_iou,
@@ -271,8 +312,10 @@ def main():
                     "Train_info/Loss/Val": val_loss,
                     "Train_info/Seg_Loss/Train": train_seg_loss,
                     "Train_info/Seg_Loss/Val": val_seg_loss,
-                    "Train_info/Con_Loss/Train": train_con_loss,
-                    "Train_info/Con_Loss/Val": val_con_loss,
+                    "Train_info/Align_Loss/Train": train_align_loss,
+                    "Train_info/Align_Loss/Val": val_align_loss,
+                    "Train_info/Cls_Loss/Train": train_cls_loss,
+                    "Train_info/Cls_Loss/Val": val_cls_loss,
                     "Train_info/IoU/Train": train_iou,
                     "Train_info/IoU/Val": val_iou,
                     "Train_info/F1/Train": train_f1,
@@ -297,7 +340,7 @@ def main():
             #         plt.close(figure)
 
             if val_iou > best_iou:
-                if val_iou > 0.6 and val_iou - report_iou > 0.01:
+                if val_iou > 0.84 and val_iou - report_iou > 0.01:
                     report_iou = val_iou
                     elapsed = (datetime.now() - start_time).total_seconds()
                     eta_seconds = (elapsed / (epoch + 1)) * (config["num_epochs"] - (epoch + 1))
