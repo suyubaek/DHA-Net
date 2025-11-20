@@ -6,7 +6,7 @@ config = {
     'batch_size': 32,
     'num_workers': 4,
 
-    'model_name': 'Nested_UNet',
+    'model_name': 'Attentive_UNet',
     'in_channels': 2,
     'num_classes': 1,
     'use_bilinear': True,

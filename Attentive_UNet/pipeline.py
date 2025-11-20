@@ -14,7 +14,7 @@ from tqdm import tqdm
 import wandb
 
 from model import Model
-from loss_function import DiceBCELoss
+from loss_function import DiceFocalLoss
 from dataprocess import get_loaders
 from config import config
 from metrics import calculate_metrics
@@ -202,8 +202,7 @@ def main():
         # 模型初始化
         model = Model(
             in_channels=config['in_channels'],
-            num_classes=config['num_classes'],
-            deep_supervision=False
+            num_classes=config['num_classes']
         )
         model = model.to(device)
         wandb.watch(model, log="all", log_freq=100)
@@ -277,7 +276,7 @@ def main():
         best_iou, report_iou = 0.0, 0.0
         best_epoch = -1
         best_model_path = os.path.join(checkpoint_dir, "best_model.pth")
-        loss_fc = DiceBCELoss().to(device)
+        loss_fc = DiceFocalLoss(alpha=0.2).to(device)
 
         for epoch in range(config["num_epochs"]):
             

@@ -196,3 +196,46 @@ class CombinedLoss(nn.Module):
             "cls": loss_cls,
         }
         return total_loss, loss_components
+
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=1, gamma=2, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        self.bce = nn.BCEWithLogitsLoss(reduction='none')
+
+    def forward(self, logits, target):
+        bce_loss = self.bce(logits, target)
+        pt = torch.exp(-bce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+
+class DiceFocalLoss(nn.Module):
+    def __init__(self, alpha=0.2):
+        super(DiceFocalLoss, self).__init__()
+        self.alpha = alpha
+        self.dice_loss = DiceLoss()
+        self.focal_loss = FocalLoss()
+
+    def forward(self, logits, target):
+        target = target.float()
+        if logits.shape != target.shape:
+            if logits.dim() == 4 and target.dim() == 3:
+                target = target.unsqueeze(1)
+            else:
+                raise ValueError(f"Shape mismatch: logits {logits.shape}, target {target.shape}")
+
+        dice = self.dice_loss(logits, target)
+        focal = self.focal_loss(logits, target)
+        
+        # Loss = α * L_dice + (1 - α) * L_focal
+        return self.alpha * dice + (1 - self.alpha) * focal
