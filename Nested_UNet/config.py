@@ -3,7 +3,7 @@ config = {
     'device': 'cuda',
 
     'data_root': '/mnt/data1/rove/dataset/S1_Water',
-    'batch_size': 16,
+    'batch_size': 32,
     'num_workers': 4,
 
     'model_name': 'Nested_UNet',
