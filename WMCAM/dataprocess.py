@@ -8,14 +8,8 @@ import torchvision.transforms.functional as TF
 import random
 from tqdm import tqdm
 
-# --- 1. S1Water Dataset 类 (核心逻辑) ---
 
 class S1WaterDataset(Dataset):
-    """
-    一个“智能”的 Dataset 类，它会自动处理负采样、
-    统计计算和结果缓存。
-    """
-    
     def __init__(self, data_dir, split, 
                  neg_sample_ratio=1.0, 
                  seed=42, 
@@ -34,45 +28,28 @@ class S1WaterDataset(Dataset):
         self.img_dir = self.data_dir / split / "img"
         self.mask_dir = self.data_dir / split / "mask"
         
-        # 预先定义波段数
         self.num_channels = 2 # (VV, VH)
-        
-        # 忽略 rasterio 警告
         warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
 
-        # --- 核心逻辑分支 ---
-        
         if split == 'train':
-            # 1. 为训练集：执行采样和统计计算
-            
-            # 创建一个基于 ratio 和 seed 的唯一缓存文件名
             cache_filename = f"train_cache_ratio_{neg_sample_ratio}_seed_{seed}.pt"
             cache_file = self.data_dir / cache_filename
             
             if cache_file.exists():
-                # 2. 如果缓存存在，则加载
                 print(f"--- 正在从缓存加载训练数据: {cache_filename} ---")
                 cache_data = torch.load(cache_file, weights_only=False)
                 self.file_list = cache_data['file_list']
                 self.mean = cache_data['mean']
                 self.std = cache_data['std']
-                
             else:
-                # 3. 如果缓存不存在，则计算
                 print(f"--- 未找到缓存，正在为 {split} split 创建新数据... ---")
                 print(f"--- (这在第一次运行时会比较慢) ---")
-                
-                # 3a. 执行负采样
                 self.file_list = self._get_sampled_file_list(
                     self.mask_dir, neg_sample_ratio, seed
                 )
-                
-                # 3b. 计算统计数据
                 self.mean, self.std = self._calculate_stats(
                     self.file_list, self.img_dir
                 )
-                
-                # 3c. 保存到缓存
                 print(f"--- 计算完成，保存到缓存: {cache_file} ---")
                 torch.save({
                     'file_list': self.file_list,
@@ -81,26 +58,19 @@ class S1WaterDataset(Dataset):
                 }, cache_file)
 
         else:
-            # 4. 为 Val/Test 集：使用完整数据和传入的统计数据
             print(f"--- 正在为 {split} split 加载完整数据... ---")
             if override_stats is None:
                 raise ValueError(f"{split} split 必须提供 'override_stats' (来自训练集)")
             
             self.file_list = sorted(list(self.mask_dir.glob("*.tif")))
             self.mean, self.std = override_stats # 使用传入的 train stats
-
-        # --- 收尾工作 ---
         if not self.file_list:
             raise FileNotFoundError(f"在 {self.mask_dir} 中未找到 .tif 文件。")
-            
-        # 将均值和标准差调整为 (C, 1, 1) 以便进行广播
+
         self.mean = self.mean.view(self.num_channels, 1, 1)
         self.std = self.std.view(self.num_channels, 1, 1)
 
     def _get_sampled_file_list(self, mask_dir, ratio, seed):
-        """
-        [内部方法] 扫描所有掩膜，将文件分为正/负，然后对负样本进行降采样。
-        """
         print(f"正在扫描 {mask_dir} 以构建文件列表...")
         positive_files = [] # 包含任何水体 (water_percent > 0)
         negative_files = [] # 纯陆地 (water_percent == 0)
@@ -141,9 +111,6 @@ class S1WaterDataset(Dataset):
         return final_file_list
 
     def _calculate_stats(self, file_list, img_dir):
-        """
-        [内部方法] 在 *采样后* 的文件列表上计算均值和标准差。
-        """
         print(f"开始计算 {len(file_list)} 个训练图块的均值和标准差...")
         channel_sum = np.zeros(self.num_channels, dtype=np.float64)
         channel_sum_sq = np.zeros(self.num_channels, dtype=np.float64)
@@ -173,13 +140,23 @@ class S1WaterDataset(Dataset):
 
         return mean, std
 
+    def _infer_cls_label(self, mask: torch.Tensor) -> torch.Tensor:
+        has_water = torch.any(mask > 0)
+        has_land = torch.any(mask == 0)
+        if has_water and has_land:
+            cls_id = 1  # 混合
+        elif has_water:
+            cls_id = 2  # 纯水
+        else:
+            cls_id = 0  # 纯陆地
+        return torch.tensor(cls_id, dtype=torch.long)
+
     def __len__(self):
         return len(self.file_list)
 
     def __getitem__(self, idx):
         mask_path = self.file_list[idx]
         img_path = self.img_dir / mask_path.name
-        
         try:
             with rasterio.open(img_path) as src_img:
                 image = src_img.read().astype(np.float32)
@@ -188,27 +165,30 @@ class S1WaterDataset(Dataset):
 
             image = torch.from_numpy(image)
             mask = torch.from_numpy(mask)
+            cls_label = self._infer_cls_label(mask)
             image = (image - self.mean) / self.std
             
             if self.split == 'train':
-                # (数据增强)
                 if torch.rand(1) > 0.5: image, mask = TF.hflip(image), TF.hflip(mask)
                 if torch.rand(1) > 0.5: image, mask = TF.vflip(image), TF.vflip(mask)
                 if torch.rand(1) > 0.5:
                     angle = (torch.rand(1).item() - 0.5) * 60
                     image = TF.rotate(image, angle, interpolation=TF.InterpolationMode.BILINEAR)
-                    mask = TF.rotate(mask, angle, interpolation=TF.InterpolationMode.NEAREST)
+                    mask = TF.rotate(
+                        mask.unsqueeze(0).float(),
+                        angle,
+                        interpolation=TF.InterpolationMode.NEAREST
+                    ).squeeze(0).long()
                 if torch.rand(1) > 0.5:
                     noise_std = torch.rand(1).item() * 0.1 
                     image = image + torch.randn_like(image) * noise_std
             
-            return image, mask
+            return image, mask, cls_label
 
         except Exception as e:
             print(f"Error loading sample {idx} ({mask_path.name}): {e}")
             return None, None
 
-# --- 2. Dataloader 辅助函数 (用户调用的函数) ---
 
 def get_loaders(data_dir, 
                 batch_size, 
@@ -231,12 +211,13 @@ def get_loaders(data_dir,
     def collate_fn_skip_none(batch):
         batch = list(filter(lambda x: x[0] is not None, batch))
         if not batch:
-            return torch.tensor([]), torch.tensor([])
+            empty = torch.empty(0)
+            empty_long = torch.empty(0, dtype=torch.long)
+            return empty, empty_long, empty_long
         return torch.utils.data.dataloader.default_collate(batch)
 
     data_dir = Path(data_dir)
 
-    # 1. 创建训练集。这将触发采样和统计计算（或加载缓存）
     train_dataset = S1WaterDataset(
         data_dir=data_dir,
         split='train',
@@ -244,7 +225,6 @@ def get_loaders(data_dir,
         seed=seed
     )
     
-    # 2. 创建验证集，并传入训练集的统计数据
     val_dataset = S1WaterDataset(
         data_dir=data_dir,
         split='val',
@@ -273,7 +253,8 @@ def get_loaders(data_dir,
     
     return train_loader, val_loader
 
-# --- 3. 示例用法 ---
+
+
 if __name__ == '__main__':
     
     print("--- 开始创建 Dataloaders (带自动采样和缓存) ---")
