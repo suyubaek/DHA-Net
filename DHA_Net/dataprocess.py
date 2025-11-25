@@ -239,7 +239,9 @@ def get_loaders(data_dir,
         num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
-        collate_fn=collate_fn_skip_none
+        collate_fn=collate_fn_skip_none,
+        persistent_workers=True,
+        prefetch_factor=2
     )
     
     val_loader = DataLoader(
@@ -248,7 +250,9 @@ def get_loaders(data_dir,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
-        collate_fn=collate_fn_skip_none
+        collate_fn=collate_fn_skip_none,
+        persistent_workers=True,
+        prefetch_factor=2
     )
     
     return train_loader, val_loader

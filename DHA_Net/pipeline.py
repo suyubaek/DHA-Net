@@ -42,9 +42,10 @@ def save_checkpoint(model, optimizer, epoch, iou, path):
 
 def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
     model.train()
-    total_loss = seg_loss_total = align_loss_total = cls_loss_total = 0.0
+    total_loss = seg_loss_total = 0.0
     iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
-
+    metric_count = 0
+    
     pbar = tqdm(train_loader, desc=f"Training Epoch {epoch}")
     for batch_idx, batch in enumerate(pbar):
         images, labels, class_labels = batch
@@ -53,6 +54,7 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
         class_labels = class_labels.to(device, non_blocking=True)
 
         optimizer.zero_grad()
+        
         seg_logits = model(images)
         if isinstance(seg_logits, list):
             # Deep supervision case
@@ -70,40 +72,36 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
 
         total_loss += loss.item()
         seg_loss_total += loss.item()
-        # align_loss_total += loss_components["align"].item()
-        # cls_loss_total += loss_components["cls"].item()
-
-        outputs = torch.sigmoid(seg_logits).detach().cpu()
-        labels = labels.cpu()
-        cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels)
-        iou += cur_iou
-        precision += cur_precision
-        recall += cur_recall
-        f1 += cur_f1
+        
+        # Calculate metrics every 50 batches
+        if (batch_idx + 1) % 50 == 0:
+            outputs = torch.sigmoid(seg_logits).detach().cpu()
+            labels_cpu = labels.cpu()
+            cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels_cpu)
+            iou += cur_iou
+            precision += cur_precision
+            recall += cur_recall
+            f1 += cur_f1
+            metric_count += 1
 
         pbar.set_postfix(
             {
                 "Loss": f"{loss.item():.4f}",
-                # "Seg_L": f"{loss_components['seg']:.4f}",
-                # "Align_L": f"{loss_components['align']:.4f}",
-                # "Cls_L": f"{loss_components['cls']:.4f}",
             }
         )
     
     avg_loss = total_loss / len(train_loader)
     avg_seg_loss = seg_loss_total / len(train_loader)
-    avg_align_loss = align_loss_total / len(train_loader)
-    avg_cls_loss = cls_loss_total / len(train_loader)
-    iou /= len(train_loader)
-    precision /= len(train_loader)
-    recall /= len(train_loader)
-    f1 /= len(train_loader)
-
+    
+    if metric_count > 0:
+        iou /= metric_count
+        precision /= metric_count
+        recall /= metric_count
+        f1 /= metric_count
+    
     return (
         avg_loss,
         avg_seg_loss,
-        avg_align_loss,
-        avg_cls_loss,
         iou,
         precision,
         recall,
@@ -112,7 +110,7 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
 
 def validate(model, val_loader, loss_fc, device, epoch):
     model.eval()
-    total_loss = seg_loss_total = align_loss_total = cls_loss_total = 0.0
+    total_loss = seg_loss_total = 0.0
     iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
 
     with torch.no_grad():
@@ -135,8 +133,6 @@ def validate(model, val_loader, loss_fc, device, epoch):
 
             total_loss += loss.item()
             seg_loss_total += loss.item()
-            # align_loss_total += loss_components["align"].item()
-            # cls_loss_total += loss_components["cls"].item()
 
             outputs = torch.sigmoid(seg_logits).detach().cpu()
             labels = labels.cpu()
@@ -148,16 +144,11 @@ def validate(model, val_loader, loss_fc, device, epoch):
 
             pbar.set_postfix(
                 {
-                    "Loss": f"{loss.item():.4f}",
-                    # "Seg_L": f"{loss_components['seg']:.4f}",
-                    # "Align_L": f"{loss_components['align']:.4f}",
-                    # "Cls_L": f"{loss_components['cls']:.4f}",
+                    "Loss": f"{loss.item():.4f}"
                 }
             )
     avg_loss = total_loss / len(val_loader)
     avg_seg_loss = seg_loss_total / len(val_loader)
-    avg_align_loss = align_loss_total / len(val_loader)
-    avg_cls_loss = cls_loss_total / len(val_loader)
     iou /= len(val_loader)
     precision /= len(val_loader)
     recall /= len(val_loader)
@@ -166,8 +157,6 @@ def validate(model, val_loader, loss_fc, device, epoch):
     return (
         avg_loss,
         avg_seg_loss,
-        avg_align_loss,
-        avg_cls_loss,
         iou,
         precision,
         recall,
@@ -295,7 +284,7 @@ def main():
             scheduler.step()
 
             wandb.log(
-                {   
+                {   "Epoch": epoch + 1,
                     "Comparison Board/IoU": val_iou,
                     "Comparison Board/F1": val_f1,
                     "Comparison Board/Precision": val_precision,
@@ -305,10 +294,6 @@ def main():
                     "Train_info/Loss/Val": val_loss,
                     "Train_info/Seg_Loss/Train": train_seg_loss,
                     "Train_info/Seg_Loss/Val": val_seg_loss,
-                    "Train_info/Align_Loss/Train": train_align_loss,
-                    "Train_info/Align_Loss/Val": val_align_loss,
-                    "Train_info/Cls_Loss/Train": train_cls_loss,
-                    "Train_info/Cls_Loss/Val": val_cls_loss,
                     "Train_info/IoU/Train": train_iou,
                     "Train_info/IoU/Val": val_iou,
                     "Train_info/F1/Train": train_f1,
