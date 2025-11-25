@@ -187,7 +187,7 @@ def main():
         project="LanCang River",
         name=experiment_name,
         config=config,
-        tags=["HTCC"],
+        tags=["DHA"],
     )
 
     try:
@@ -333,7 +333,7 @@ def main():
             #         plt.close(figure)
 
             if val_iou > best_iou:
-                if val_iou > 0.84 and val_iou - report_iou > 0.01:
+                if val_iou > 0.7 and val_iou - report_iou > 0.01:
                     report_iou = val_iou
                     elapsed = (datetime.now() - start_time).total_seconds()
                     eta_seconds = (elapsed / (epoch + 1)) * (config["num_epochs"] - (epoch + 1))

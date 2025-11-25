@@ -3,10 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
 
-# ==========================================
-# 1. Attention Modules
-# ==========================================
-
 class ChannelAttention(nn.Module):
     def __init__(self, in_channels, reduction_ratio=16):
         super(ChannelAttention, self).__init__()
@@ -53,9 +49,6 @@ class DualAttentionBlock(nn.Module):
         x = x * self.sa(x)
         return x
 
-# ==========================================
-# 2. Encoders
-# ==========================================
 
 class CNNEncoder(nn.Module):
     """ResNet-34 Encoder"""
@@ -145,9 +138,6 @@ class ViTEncoder(nn.Module):
         
         return s1, s2, s3, s4
 
-# ==========================================
-# 3. Fusion & Decoder
-# ==========================================
 
 class FusionBlock(nn.Module):
     def __init__(self, cnn_channels, vit_channels, out_channels):
@@ -194,9 +184,6 @@ class DecoderBlock(nn.Module):
         x = self.att(x)
         return x
 
-# ==========================================
-# 4. Main Model: DHA-Net
-# ==========================================
 
 class Model(nn.Module):
     def __init__(self, in_channels=2, num_classes=1):

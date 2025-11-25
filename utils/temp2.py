@@ -12,7 +12,7 @@ from tqdm import tqdm
 # 使用绝对路径是最安全、最不会出错的。
 
 # 你的根目录 (lancang)
-base_dir = "/mnt/sda1/songyufei/asset/lancang"
+base_dir = "/mnt/data1/rove/asset/lancang"
 
 # 输入目录
 input_dir = os.path.join(base_dir, "data_managed")
