@@ -69,13 +69,10 @@ class CNNEncoder(nn.Module):
             old_conv = resnet.conv1
             new_conv = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
             
-            # Initialize with average of pretrained weights
+            # Initialize with first 'in_channels' of pretrained weights (e.g. R, G)
+            # User suggestion: R and G weights are better than random or average for SAR
             with torch.no_grad():
-                # old_conv.weight shape: [64, 3, 7, 7]
-                # new_conv.weight shape: [64, 2, 7, 7]
-                # Average across the channel dimension (dim 1)
-                avg_weight = torch.mean(old_conv.weight, dim=1, keepdim=True) # [64, 1, 7, 7]
-                new_conv.weight.copy_(avg_weight.repeat(1, in_channels, 1, 1))
+                new_conv.weight.copy_(old_conv.weight[:, :in_channels, :, :])
             
             self.stem = nn.Sequential(
                 new_conv,
@@ -175,7 +172,8 @@ class FusionBlock(nn.Module):
 class DecoderBlock(nn.Module):
     def __init__(self, in_channels, skip_channels, out_channels):
         super(DecoderBlock, self).__init__()
-        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        # Use Transposed Convolution for upsampling
+        self.up = nn.ConvTranspose2d(in_channels, in_channels, kernel_size=2, stride=2)
         
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels + skip_channels, out_channels, 3, padding=1, bias=False),
