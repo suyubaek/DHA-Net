@@ -61,12 +61,24 @@ class CNNEncoder(nn.Module):
     """ResNet-34 Encoder"""
     def __init__(self, in_channels=2):
         super(CNNEncoder, self).__init__()
+        # Load pretrained weights
         resnet = models.resnet34(weights=models.ResNet34_Weights.IMAGENET1K_V1)
         
         # Modify first layer for 2-channel input
         if in_channels != 3:
+            old_conv = resnet.conv1
+            new_conv = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
+            
+            # Initialize with average of pretrained weights
+            with torch.no_grad():
+                # old_conv.weight shape: [64, 3, 7, 7]
+                # new_conv.weight shape: [64, 2, 7, 7]
+                # Average across the channel dimension (dim 1)
+                avg_weight = torch.mean(old_conv.weight, dim=1, keepdim=True) # [64, 1, 7, 7]
+                new_conv.weight.copy_(avg_weight.repeat(1, in_channels, 1, 1))
+            
             self.stem = nn.Sequential(
-                nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False),
+                new_conv,
                 resnet.bn1,
                 resnet.relu,
                 resnet.maxpool
@@ -97,55 +109,39 @@ class ViTEncoder(nn.Module):
     def __init__(self, in_channels=2):
         super(ViTEncoder, self).__init__()
         # Use torchvision's swin_t
-        # Note: torchvision swin models expect 3 channels. We need to adapt.
-        # We'll use a 1x1 conv to project 2->3 channels at the start.
         self.adapter = nn.Conv2d(in_channels, 3, 1)
-        self.swin = models.swin_t(weights=models.Swin_T_Weights.IMAGENET1K_V1)
-        
-        # Swin features extraction is a bit tricky with torchvision implementation 
-        # as it doesn't expose intermediate layers easily in `forward`.
-        # We need to hook or reimplement forward. 
-        # For simplicity and robustness, we will use the features sequential block.
-        # features[0]: PatchPartition
-        # features[1]: LinearEmbedding
-        # features[2]: PatchMerging + SwinBlock (Stage 1)
-        # features[3]: PatchMerging + SwinBlock (Stage 2) ...
-        # Actually torchvision structure:
-        # features[0]: Sequential(Conv2d...) -> Patch Partition + Linear Embedding
-        # features[1]: Sequential(SwinTransformerBlock...) -> Stage 1
-        # features[2]: PatchMerging
-        # features[3]: Sequential(SwinTransformerBlock...) -> Stage 2
-        # ...
-        
-        self.features = self.swin.features
+        swin = models.swin_t(weights=models.Swin_T_Weights.IMAGENET1K_V1)
+        self.features = swin.features
         
     def forward(self, x):
         x = self.adapter(x)
         
-        # Stage 1 (Output 1/4)
+        # Swin Transformer features structure:
         # 0: PatchPartition + LinearEmbedding
         # 1: Stage 1 Blocks
+        # 2: PatchMerging
+        # 3: Stage 2 Blocks
+        # 4: PatchMerging
+        # 5: Stage 3 Blocks
+        # 6: PatchMerging
+        # 7: Stage 4 Blocks
+        
+        # Stage 1 (Output 1/4)
         x = self.features[0](x)
         x = self.features[1](x)
         s1 = x.permute(0, 3, 1, 2) # BHWC -> BCHW
         
         # Stage 2 (Output 1/8)
-        # 2: PatchMerging
-        # 3: Stage 2 Blocks
         x = self.features[2](x)
         x = self.features[3](x)
         s2 = x.permute(0, 3, 1, 2)
         
         # Stage 3 (Output 1/16)
-        # 4: PatchMerging
-        # 5: Stage 3 Blocks
         x = self.features[4](x)
         x = self.features[5](x)
         s3 = x.permute(0, 3, 1, 2)
         
         # Stage 4 (Output 1/32)
-        # 6: PatchMerging
-        # 7: Stage 4 Blocks
         x = self.features[6](x)
         x = self.features[7](x)
         s4 = x.permute(0, 3, 1, 2)
