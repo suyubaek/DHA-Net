@@ -271,12 +271,12 @@ def main():
 
         for epoch in range(config["num_epochs"]):
             
-            train_loss, train_seg_loss, train_align_loss, train_cls_loss, \
+            train_loss, train_seg_loss, \
             train_iou, train_precision, train_recall, train_f1 = train_one_epoch(
                 model, train_loader, optimizer, loss_fc, device, epoch + 1
             )
 
-            val_loss, val_seg_loss, val_align_loss, val_cls_loss, \
+            val_loss, val_seg_loss, \
             val_iou, val_precision, val_recall, val_f1 = validate(
                 model, val_loader, loss_fc, device, epoch + 1
             )
