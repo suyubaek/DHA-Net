@@ -254,8 +254,25 @@ def get_loaders(data_dir,
         persistent_workers=True,
         prefetch_factor=2
     )
+
+    test_dataset = S1WaterDataset(
+        data_dir=data_dir,
+        split='test',
+        override_stats=(train_dataset.mean.squeeze(), train_dataset.std.squeeze())
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        collate_fn=collate_fn_skip_none,
+        persistent_workers=True,
+        prefetch_factor=2
+    )
     
-    return train_loader, val_loader
+    return train_loader, val_loader, test_loader
 
 
 

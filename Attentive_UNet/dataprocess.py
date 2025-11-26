@@ -250,8 +250,23 @@ def get_loaders(data_dir,
         pin_memory=True,
         collate_fn=collate_fn_skip_none
     )
+
+    test_dataset = S1WaterDataset(
+        data_dir=data_dir,
+        split='test',
+        override_stats=(train_dataset.mean.squeeze(), train_dataset.std.squeeze())
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        collate_fn=collate_fn_skip_none
+    )
     
-    return train_loader, val_loader
+    return train_loader, val_loader, test_loader
 
 
 

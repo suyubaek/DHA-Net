@@ -164,6 +164,63 @@ def validate(model, val_loader, loss_fc, device, epoch):
     )
 
 
+def test(model, test_loader, loss_fc, device):
+    model.eval()
+    total_loss = seg_loss_total = 0.0
+    iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
+
+    with torch.no_grad():
+        pbar = tqdm(test_loader, desc="Testing")
+        for batch_idx, batch in enumerate(pbar):
+            images, labels, class_labels = batch
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            class_labels = class_labels.to(device, non_blocking=True)
+
+            seg_logits = model(images)
+            if isinstance(seg_logits, list):
+                loss = 0
+                for logits in seg_logits:
+                    loss += loss_fc(logits, labels)
+                loss /= len(seg_logits)
+                seg_logits = seg_logits[0]
+            else:
+                loss = loss_fc(seg_logits, labels)
+
+            total_loss += loss.item()
+            seg_loss_total += loss.item()
+
+            outputs = torch.sigmoid(seg_logits).detach().cpu()
+            labels = labels.cpu()
+            cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels)
+            iou += cur_iou
+            precision += cur_precision
+            recall += cur_recall
+            f1 += cur_f1
+
+            pbar.set_postfix(
+                {
+                    "Loss": f"{loss.item():.4f}"
+                }
+            )
+    
+    avg_loss = total_loss / len(test_loader)
+    avg_seg_loss = seg_loss_total / len(test_loader)
+    iou /= len(test_loader)
+    precision /= len(test_loader)
+    recall /= len(test_loader)
+    f1 /= len(test_loader)
+
+    return (
+        avg_loss,
+        avg_seg_loss,
+        iou,
+        precision,
+        recall,
+        f1,
+    )
+
+
 def main():
     # 设置随机种子
     set_seed(config["seed"])
@@ -180,12 +237,26 @@ def main():
     )
 
     try:
-        train_loader, val_loader = get_loaders(
+        train_loader, val_loader, test_loader = get_loaders(
             data_dir=config["data_root"],
             batch_size=config["batch_size"],
             num_workers=config["num_workers"],
             neg_sample_ratio=0.3,
             seed=config["seed"],
+        )
+
+        # Create visualization loader using 'vis' split
+        vis_dataset = S1WaterDataset(
+            data_dir=config["data_root"],
+            split='vis',
+            override_stats=(train_loader.dataset.mean.squeeze(), train_loader.dataset.std.squeeze())
+        )
+        vis_loader = torch.utils.data.DataLoader(
+            vis_dataset,
+            batch_size=12,
+            shuffle=False,
+            num_workers=4,
+            collate_fn=val_loader.collate_fn
         )
 
         # 模型初始化
@@ -311,11 +382,11 @@ def main():
             )
 
             # 每10个epoch保存一次可视化结果
-            # if (epoch + 1) % 10 == 0:
-            #     figure = create_sample_images(model, vis_loader, device, epoch + 1, num_samples=len(vis_loader))
-            #     if figure:
-            #         wandb.log({"Prediction_Summary": wandb.Image(figure)})
-            #         plt.close(figure)
+            if (epoch + 1) % 10 == 0:
+                figure = create_sample_images(model, vis_loader, device, epoch + 1, num_samples=12)
+                if figure:
+                    wandb.log({"Prediction_Summary": wandb.Image(figure)})
+                    plt.close(figure)
 
             if val_iou > best_iou:
                 if val_iou > 0.7 and val_iou - report_iou > 0.01:
@@ -359,10 +430,24 @@ def main():
                         logging.info(f"已删除临时检查点: {file_to_delete}")
                     except OSError as e:
                         logging.error(f"删除文件 {file_to_delete} 时出错: {e}")
+        
+        # Test Process
+        logging.info("开始测试...")
+        test_loss, test_seg_loss, test_iou, test_precision, test_recall, test_f1 = test(
+            model, test_loader, loss_fc, device
+        )
+        logging.info(f"Test Results - IoU: {test_iou:.4f}, F1: {test_f1:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
+        wandb.log({
+            "Test/IoU": test_iou,
+            "Test/F1": test_f1,
+            "Test/Precision": test_precision,
+            "Test/Recall": test_recall,
+            "Test/Loss": test_loss
+        })
 
         send_message(
             title=f"实验结束: {experiment_name}",
-            content=f"训练完成!\n最佳 Val IoU: {best_iou:.4f} (at epoch {best_epoch})",
+            content=f"训练完成!\n最佳 Val IoU: {best_iou:.4f} (at epoch {best_epoch})\nTest IoU: {test_iou:.4f}",
         )
 
     except Exception as exc:
