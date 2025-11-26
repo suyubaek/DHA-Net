@@ -269,14 +269,14 @@ if __name__ == '__main__':
     
     # !! 在这里测试您的新参数 !!
     # 第一次运行会很慢，第二次运行会立即加载
-    NEG_RATIO = 0.5 
+    NEG_RATIO = 0.3
 
     train_loader, val_loader = get_loaders(
         data_dir=DATA_ROOT,
         batch_size=BATCH_SIZE,
         num_workers=NUM_WORKERS,
         neg_sample_ratio=NEG_RATIO, # <-- 传入参数
-        seed=42
+        seed=3047
     )
     
     print(f"\nTrain Dataloader (采样率 {NEG_RATIO}): {len(train_loader)} 批次")
@@ -284,10 +284,53 @@ if __name__ == '__main__':
     
     print("\n--- 测试加载一个批次 (Train) ---")
     try:
-        images, masks = next(iter(train_loader))
+        # 注意：__getitem__ 返回 3 个值 (image, mask, cls_label)
+        batch_data = next(iter(train_loader))
+        images, masks, cls_labels = batch_data
+        
         print(f"图像 (Images) 批次形状: {images.shape}")
         print(f"图像 (Images) 数据类型: {images.dtype}")
         print(f"掩膜 (Masks) 批次形状: {masks.shape}")
         print(f"掩膜 (Masks) 数据类型: {masks.dtype}")
+        print(f"类别 (Labels) 批次形状: {cls_labels.shape}")
+
+        print("\n--- 数据分布详细检查 ---")
+        
+        # 1. 图像数值分布检查 (检查标准化效果)
+        print(f"[图像分布]")
+        print(f"  Min: {images.min():.4f}")
+        print(f"  Max: {images.max():.4f}")
+        print(f"  Mean: {images.mean():.4f} (理想值接近 0)")
+        print(f"  Std:  {images.std():.4f}  (理想值接近 1)")
+        
+        # 检查是否有 NaN 或 Inf
+        if torch.isnan(images).any() or torch.isinf(images).any():
+            print("  [警告] 图像数据中包含 NaN 或 Inf！")
+        else:
+            print("  数值有效性检查通过 (无 NaN/Inf)")
+
+        # 2. 掩膜数值分布检查
+        print(f"\n[掩膜分布]")
+        unique_vals = torch.unique(masks)
+        print(f"  包含的唯一值: {unique_vals.tolist()}")
+        
+        water_pixels = (masks == 1).sum().item()
+        total_pixels = masks.numel()
+        water_ratio = water_pixels / total_pixels
+        print(f"  水体像素占比 (Batch): {water_ratio:.2%}")
+        
+        if not torch.all((masks == 0) | (masks == 1)):
+             print("  [警告] 掩膜中包含非 0/1 的异常值！")
+
+        # 3. 类别标签分布
+        print(f"\n[图像级标签分布]")
+        # 0: 纯陆地, 1: 混合, 2: 纯水
+        cls_counts = torch.bincount(cls_labels, minlength=3)
+        print(f"  纯陆地 (0): {cls_counts[0]} 张")
+        print(f"  混合 (1):   {cls_counts[1]} 张")
+        print(f"  纯水 (2):   {cls_counts[2]} 张")
+
     except Exception as e:
         print(f"加载批次时出错: {e}")
+        import traceback
+        traceback.print_exc()
