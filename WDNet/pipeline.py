@@ -20,6 +20,44 @@ from config import config
 from metrics import calculate_metrics
 from message2lark import send_message
 from visualization import create_sample_images
+import torchvision.transforms.functional as TF
+
+class GPUAugmentor:
+    """
+    GPU-accelerated augmentations: Rotation and Noise.
+    """
+    def __init__(self, rotate_prob=0.5, noise_prob=0.5, max_angle=60, noise_std=0.1):
+        self.rotate_prob = rotate_prob
+        self.noise_prob = noise_prob
+        self.max_angle = max_angle
+        self.noise_std = noise_std
+
+    def __call__(self, images, masks):
+        # images: (B, C, H, W)
+        # masks: (B, H, W) or (B, 1, H, W)
+        
+        B = images.shape[0]
+        
+        # 1. Random Rotation
+        if torch.rand(1) < self.rotate_prob:
+            angle = (torch.rand(1).item() - 0.5) * 2 * self.max_angle
+            images = TF.rotate(images, angle, interpolation=TF.InterpolationMode.BILINEAR)
+            
+            # Ensure mask has channel dim for rotation
+            if masks.dim() == 3:
+                masks = masks.unsqueeze(1)
+                masks = TF.rotate(masks.float(), angle, interpolation=TF.InterpolationMode.NEAREST)
+                masks = masks.squeeze(1).long()
+            else:
+                masks = TF.rotate(masks.float(), angle, interpolation=TF.InterpolationMode.NEAREST).long()
+
+        # 2. Random Noise
+        if torch.rand(1) < self.noise_prob:
+            noise_scale = torch.rand(1).item() * self.noise_std
+            noise = torch.randn_like(images) * noise_scale
+            images = images + noise
+            
+        return images, masks
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -45,12 +83,19 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
     total_loss = seg_loss_total = align_loss_total = cls_loss_total = 0.0
     iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
 
+    # Initialize GPU Augmentor
+    augmentor = GPUAugmentor(rotate_prob=0.5, noise_prob=0.5)
+
     pbar = tqdm(train_loader, desc=f"Training Epoch {epoch}")
     for batch_idx, batch in enumerate(pbar):
         images, labels, class_labels = batch
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         class_labels = class_labels.to(device, non_blocking=True)
+
+        # Apply GPU Augmentation
+        with torch.no_grad():
+            images, labels = augmentor(images, labels)
 
         optimizer.zero_grad()
         seg_logits = model(images)
