@@ -13,7 +13,8 @@ class S1WaterDataset(Dataset):
     def __init__(self, data_dir, split, 
                  neg_sample_ratio=1.0, 
                  seed=42, 
-                 override_stats=None):
+                 override_stats=None,
+                 preload=True):
         """
         Args:
             data_dir (Path or str): 数据集根目录 (S1_Water)
@@ -22,11 +23,13 @@ class S1WaterDataset(Dataset):
             seed (int): (仅用于 'train') 随机采样的种子。
             override_stats (tuple): (仅用于 'val'/'test') 
                                     一个 (mean, std) 元组，用于标准化。
+            preload (bool): 是否将数据预加载到内存。建议 Train/Val 为 True，Test 为 False。
         """
         self.split = split
         self.data_dir = Path(data_dir)
         self.img_dir = self.data_dir / split / "img"
         self.mask_dir = self.data_dir / split / "mask"
+        self.preload = preload
         
         self.num_channels = 2 # (VV, VH)
         warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
@@ -71,34 +74,37 @@ class S1WaterDataset(Dataset):
         self.std = self.std.view(self.num_channels, 1, 1)
 
         # --- Data Preloading ---
-        print(f"--- Preloading {len(self.file_list)} images into RAM for {split} split... ---")
         self.images = []
         self.masks = []
         
-        for mask_path in tqdm(self.file_list, desc=f"Loading {split} data"):
-            img_path = self.img_dir / mask_path.name
-            try:
-                with rasterio.open(img_path) as src_img:
-                    image = src_img.read().astype(np.float32)
-                with rasterio.open(mask_path) as src_mask:
-                    mask = src_mask.read(1).astype(np.int64)
-                
-                # Convert to tensor and normalize immediately to save processing time later
-                image_t = torch.from_numpy(image)
-                mask_t = torch.from_numpy(mask)
-                
-                # Normalize here to save CPU time during training
-                image_t = (image_t - self.mean) / self.std
-                
-                self.images.append(image_t)
-                self.masks.append(mask_t)
-                
-            except Exception as e:
-                print(f"Error loading {mask_path.name}: {e}")
-                pass
-        
-        if len(self.images) != len(self.file_list):
-             print(f"Warning: Only loaded {len(self.images)}/{len(self.file_list)} images.")
+        if self.preload:
+            print(f"--- Preloading {len(self.file_list)} images into RAM for {split} split... ---")
+            for mask_path in tqdm(self.file_list, desc=f"Loading {split} data"):
+                img_path = self.img_dir / mask_path.name
+                try:
+                    with rasterio.open(img_path) as src_img:
+                        image = src_img.read().astype(np.float32)
+                    with rasterio.open(mask_path) as src_mask:
+                        mask = src_mask.read(1).astype(np.int64)
+                    
+                    # Convert to tensor and normalize immediately to save processing time later
+                    image_t = torch.from_numpy(image)
+                    mask_t = torch.from_numpy(mask)
+                    
+                    # Normalize here to save CPU time during training
+                    image_t = (image_t - self.mean) / self.std
+                    
+                    self.images.append(image_t)
+                    self.masks.append(mask_t)
+                    
+                except Exception as e:
+                    print(f"Error loading {mask_path.name}: {e}")
+                    pass
+            
+            if len(self.images) != len(self.file_list):
+                 print(f"Warning: Only loaded {len(self.images)}/{len(self.file_list)} images.")
+        else:
+            print(f"--- {split} split: Lazy loading mode (Reading from disk on-the-fly) ---")
 
     def _get_sampled_file_list(self, mask_dir, ratio, seed):
         print(f"正在扫描 {mask_dir} 以构建文件列表...")
@@ -182,23 +188,44 @@ class S1WaterDataset(Dataset):
         return torch.tensor(cls_id, dtype=torch.long)
 
     def __len__(self):
-        return len(self.images)
+        if self.preload:
+            return len(self.images)
+        return len(self.file_list)
 
     def __getitem__(self, idx):
-        # Retrieve from memory
-        image = self.images[idx]
-        mask = self.masks[idx]
-        
-        cls_label = self._infer_cls_label(mask)
-        
-        # CPU Augmentation: Only Flips
-        if self.split == 'train':
-            if torch.rand(1) > 0.5: image, mask = TF.hflip(image), TF.hflip(mask)
-            if torch.rand(1) > 0.5: image, mask = TF.vflip(image), TF.vflip(mask)
+        try:
+            if self.preload:
+                # Retrieve from memory
+                image = self.images[idx]
+                mask = self.masks[idx]
+            else:
+                # Lazy load from disk
+                mask_path = self.file_list[idx]
+                img_path = self.img_dir / mask_path.name
+                
+                with rasterio.open(img_path) as src_img:
+                    image = src_img.read().astype(np.float32)
+                with rasterio.open(mask_path) as src_mask:
+                    mask = src_mask.read(1).astype(np.int64)
+
+                image = torch.from_numpy(image)
+                mask = torch.from_numpy(mask)
+                image = (image - self.mean) / self.std
+
+            cls_label = self._infer_cls_label(mask)
             
-            # Rotation and Noise moved to GPU
-        
-        return image, mask, cls_label
+            # CPU Augmentation: Only Flips (Only for train)
+            if self.split == 'train':
+                if torch.rand(1) > 0.5: image, mask = TF.hflip(image), TF.hflip(mask)
+                if torch.rand(1) > 0.5: image, mask = TF.vflip(image), TF.vflip(mask)
+                
+                # Rotation and Noise moved to GPU
+            
+            return image, mask, cls_label
+
+        except Exception as e:
+            print(f"Error loading sample {idx}: {e}")
+            return None, None
 
 
 
@@ -235,13 +262,15 @@ def get_loaders(data_dir,
         data_dir=data_dir,
         split='train',
         neg_sample_ratio=neg_sample_ratio,
-        seed=seed
+        seed=seed,
+        preload=True
     )
     
     val_dataset = S1WaterDataset(
         data_dir=data_dir,
         split='val',
-        override_stats=(train_dataset.mean.squeeze(), train_dataset.std.squeeze())
+        override_stats=(train_dataset.mean.squeeze(), train_dataset.std.squeeze()),
+        preload=True
     )
     
     # 3. 创建 Dataloaders
@@ -271,7 +300,8 @@ def get_loaders(data_dir,
     test_dataset = S1WaterDataset(
         data_dir=data_dir,
         split='test',
-        override_stats=(train_dataset.mean.squeeze(), train_dataset.std.squeeze())
+        override_stats=(train_dataset.mean.squeeze(), train_dataset.std.squeeze()),
+        preload=False # Lazy load for test
     )
 
     test_loader = DataLoader(
