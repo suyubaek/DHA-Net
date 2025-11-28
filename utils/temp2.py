@@ -7,7 +7,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 # --- 配置路径 ---
-DATA_ROOT = Path("/mnt/data1/rove/dataset/S1_Water_512")
+DATA_ROOT = Path("/mnt/data1/rove/dataset/S1_Water")
 TEST_IMG_DIR = DATA_ROOT / "test" / "img"
 TEST_MASK_DIR = DATA_ROOT / "test" / "mask"
 VIS_DIR = DATA_ROOT / "vis"

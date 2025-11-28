@@ -155,9 +155,9 @@ class Model(nn.Module):
     def __init__(self, in_channels=2, num_classes=1):
         super(Model, self).__init__()
         
-        # --- Encoder: ResNet101 Backbone ---
-        # 论文指定 ResNet101 
-        resnet = models.resnet101(weights=models.ResNet101_Weights.IMAGENET1K_V1)
+        # 修改这里：使用 resnet50 或 resnet18
+        # resnet = models.resnet101(...) 
+        resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1) 
         
         # 修改第一层卷积以适应 2 通道输入 (你的数据是 2*256*256)
         # 原始 ResNet 输入是 3 通道
