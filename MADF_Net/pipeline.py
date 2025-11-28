@@ -14,7 +14,7 @@ from tqdm import tqdm
 import wandb
 
 from model import Model
-from loss_function import DiceFocalLoss
+from loss_function import DiceBCELoss
 from dataprocess import get_loaders, S1WaterDataset
 from config import config
 from metrics import calculate_metrics
@@ -345,7 +345,7 @@ def main():
         best_iou, report_iou = 0.0, 0.0
         best_epoch = -1
         best_model_path = os.path.join(checkpoint_dir, "best_model.pth")
-        loss_fc = DiceFocalLoss(alpha=0.2).to(device)
+        loss_fc = DiceBCELoss(dice_weight=0.5, bce_weight=0.5).to(device)
 
         for epoch in range(config["num_epochs"]):
             
