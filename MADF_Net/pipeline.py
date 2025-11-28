@@ -114,8 +114,7 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
         seg_loss_total += loss.item()
 
 
-        outputs = torch.sigmoid(seg_logits).detach().cpu()
-        labels = labels.cpu()
+        outputs = torch.sigmoid(seg_logits).detach()
         cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels)
         iou += cur_iou
         precision += cur_precision
@@ -173,8 +172,7 @@ def validate(model, val_loader, loss_fc, device, epoch):
             seg_loss_total += loss.item()
 
 
-            outputs = torch.sigmoid(seg_logits).detach().cpu()
-            labels = labels.cpu()
+            outputs = torch.sigmoid(seg_logits).detach()
             cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels)
             iou += cur_iou
             precision += cur_precision
@@ -231,8 +229,7 @@ def test(model, test_loader, loss_fc, device):
             total_loss += loss.item()
             seg_loss_total += loss.item()
 
-            outputs = torch.sigmoid(seg_logits).detach().cpu()
-            labels = labels.cpu()
+            outputs = torch.sigmoid(seg_logits).detach()
             cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels)
             iou += cur_iou
             precision += cur_precision

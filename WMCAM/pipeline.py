@@ -72,8 +72,7 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
         align_loss_total += loss_components["align"].item()
         cls_loss_total += loss_components["cls"].item()
 
-        outputs = torch.sigmoid(seg_logits).detach().cpu()
-        labels = labels.cpu()
+        outputs = torch.sigmoid(seg_logits).detach()
         cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels)
         iou += cur_iou
         precision += cur_precision
