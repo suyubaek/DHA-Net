@@ -70,6 +70,36 @@ class S1WaterDataset(Dataset):
         self.mean = self.mean.view(self.num_channels, 1, 1)
         self.std = self.std.view(self.num_channels, 1, 1)
 
+        # --- Data Preloading ---
+        print(f"--- Preloading {len(self.file_list)} images into RAM for {split} split... ---")
+        self.images = []
+        self.masks = []
+        
+        for mask_path in tqdm(self.file_list, desc=f"Loading {split} data"):
+            img_path = self.img_dir / mask_path.name
+            try:
+                with rasterio.open(img_path) as src_img:
+                    image = src_img.read().astype(np.float32)
+                with rasterio.open(mask_path) as src_mask:
+                    mask = src_mask.read(1).astype(np.int64)
+                
+                # Convert to tensor and normalize immediately to save processing time later
+                image_t = torch.from_numpy(image)
+                mask_t = torch.from_numpy(mask)
+                
+                # Normalize here to save CPU time during training
+                image_t = (image_t - self.mean) / self.std
+                
+                self.images.append(image_t)
+                self.masks.append(mask_t)
+                
+            except Exception as e:
+                print(f"Error loading {mask_path.name}: {e}")
+                pass
+        
+        if len(self.images) != len(self.file_list):
+             print(f"Warning: Only loaded {len(self.images)}/{len(self.file_list)} images.")
+
     def _get_sampled_file_list(self, mask_dir, ratio, seed):
         print(f"正在扫描 {mask_dir} 以构建文件列表...")
         positive_files = [] # 包含任何水体 (water_percent > 0)
@@ -152,42 +182,25 @@ class S1WaterDataset(Dataset):
         return torch.tensor(cls_id, dtype=torch.long)
 
     def __len__(self):
-        return len(self.file_list)
+        return len(self.images)
 
     def __getitem__(self, idx):
-        mask_path = self.file_list[idx]
-        img_path = self.img_dir / mask_path.name
-        try:
-            with rasterio.open(img_path) as src_img:
-                image = src_img.read().astype(np.float32)
-            with rasterio.open(mask_path) as src_mask:
-                mask = src_mask.read(1).astype(np.int64)
-
-            image = torch.from_numpy(image)
-            mask = torch.from_numpy(mask)
-            cls_label = self._infer_cls_label(mask)
-            image = (image - self.mean) / self.std
+        # Retrieve from memory
+        image = self.images[idx]
+        mask = self.masks[idx]
+        
+        cls_label = self._infer_cls_label(mask)
+        
+        # CPU Augmentation: Only Flips
+        if self.split == 'train':
+            if torch.rand(1) > 0.5: image, mask = TF.hflip(image), TF.hflip(mask)
+            if torch.rand(1) > 0.5: image, mask = TF.vflip(image), TF.vflip(mask)
             
-            if self.split == 'train':
-                if torch.rand(1) > 0.5: image, mask = TF.hflip(image), TF.hflip(mask)
-                if torch.rand(1) > 0.5: image, mask = TF.vflip(image), TF.vflip(mask)
-                if torch.rand(1) > 0.5:
-                    angle = (torch.rand(1).item() - 0.5) * 60
-                    image = TF.rotate(image, angle, interpolation=TF.InterpolationMode.BILINEAR)
-                    mask = TF.rotate(
-                        mask.unsqueeze(0).float(),
-                        angle,
-                        interpolation=TF.InterpolationMode.NEAREST
-                    ).squeeze(0).long()
-                if torch.rand(1) > 0.5:
-                    noise_std = torch.rand(1).item() * 0.1 
-                    image = image + torch.randn_like(image) * noise_std
-            
-            return image, mask, cls_label
+            # Rotation and Noise moved to GPU
+        
+        return image, mask, cls_label
 
-        except Exception as e:
-            print(f"Error loading sample {idx} ({mask_path.name}): {e}")
-            return None, None
+
 
 
 def get_loaders(data_dir, 
