@@ -2,7 +2,7 @@ config = {
     'seed': 3047,
     'device': 'cuda',
 
-    'data_root': '/mnt/data1/rove/dataset/S1_Water_512',
+    'data_root': '/mnt/data1/rove/dataset/S1_Water',
     'batch_size': 16,
     'num_workers': 16,
 

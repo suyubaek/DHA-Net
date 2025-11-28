@@ -23,9 +23,6 @@ from visualization import create_sample_images
 import torchvision.transforms.functional as TF
 
 class GPUAugmentor:
-    """
-    GPU-accelerated augmentations: Rotation and Noise.
-    """
     def __init__(self, rotate_prob=0.5, noise_prob=0.5, max_angle=60, noise_std=0.1):
         self.rotate_prob = rotate_prob
         self.noise_prob = noise_prob
@@ -135,8 +132,6 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
     
     avg_loss = total_loss / len(train_loader)
     avg_seg_loss = seg_loss_total / len(train_loader)
-    avg_align_loss = align_loss_total / len(train_loader)
-    avg_cls_loss = cls_loss_total / len(train_loader)
     iou /= len(train_loader)
     precision /= len(train_loader)
     recall /= len(train_loader)
@@ -195,8 +190,6 @@ def validate(model, val_loader, loss_fc, device, epoch):
             )
     avg_loss = total_loss / len(val_loader)
     avg_seg_loss = seg_loss_total / len(val_loader)
-    avg_align_loss = align_loss_total / len(val_loader)
-    avg_cls_loss = cls_loss_total / len(val_loader)
     iou /= len(val_loader)
     precision /= len(val_loader)
     recall /= len(val_loader)
@@ -295,7 +288,8 @@ def main():
         vis_dataset = S1WaterDataset(
             data_dir=config["data_root"],
             split='vis',
-            override_stats=(train_loader.dataset.mean.squeeze(), train_loader.dataset.std.squeeze())
+            override_stats=(train_loader.dataset.mean.squeeze(), train_loader.dataset.std.squeeze()),
+            preload=False
         )
         vis_loader = torch.utils.data.DataLoader(
             vis_dataset,

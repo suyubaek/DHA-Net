@@ -301,7 +301,7 @@ def get_loaders(data_dir,
         data_dir=data_dir,
         split='test',
         override_stats=(train_dataset.mean.squeeze(), train_dataset.std.squeeze()),
-        preload=False # Lazy load for test
+        preload=False
     )
 
     test_loader = DataLoader(
