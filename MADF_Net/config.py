@@ -9,9 +9,6 @@ config = {
     'model_name': 'MADF_Net',
     'in_channels': 2,
     'num_classes': 1,
-    'use_bilinear': True,
-    'image_size': 256,
-    'patch_size': 16,
 
     'learning_rate': 3e-4,
     'min_lr': 1e-6,

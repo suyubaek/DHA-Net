@@ -15,7 +15,7 @@ import wandb
 
 from model import Model
 from loss_function import DiceFocalLoss
-from dataprocess import get_loaders
+from dataprocess import get_loaders, S1WaterDataset
 from config import config
 from metrics import calculate_metrics
 from message2lark import send_message
@@ -244,7 +244,7 @@ def main():
         project="LanCang River",
         name=experiment_name,
         config=config,
-        tags=["HTCC"],
+        tags=["MADF", "256"],
     )
 
     try:
@@ -255,9 +255,6 @@ def main():
             neg_sample_ratio=0.3,
             seed=config["seed"],
         )
-
-        # Create visualization loader using 'vis' split
-        from dataprocess import S1WaterDataset
         vis_dataset = S1WaterDataset(
             data_dir=config["data_root"],
             split='vis',
