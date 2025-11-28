@@ -42,7 +42,7 @@ def save_checkpoint(model, optimizer, epoch, iou, path):
 
 def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
     model.train()
-    total_loss = seg_loss_total = align_loss_total = cls_loss_total = 0.0
+    total_loss = seg_loss_total = 0.0
     iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
 
     pbar = tqdm(train_loader, desc=f"Training Epoch {epoch}")
@@ -70,8 +70,7 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
 
         total_loss += loss.item()
         seg_loss_total += loss.item()
-        # align_loss_total += loss_components["align"].item()
-        # cls_loss_total += loss_components["cls"].item()
+
 
         outputs = torch.sigmoid(seg_logits).detach().cpu()
         labels = labels.cpu()
@@ -85,8 +84,7 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
             {
                 "Loss": f"{loss.item():.4f}",
                 # "Seg_L": f"{loss_components['seg']:.4f}",
-                # "Align_L": f"{loss_components['align']:.4f}",
-                # "Cls_L": f"{loss_components['cls']:.4f}",
+
             }
         )
     
@@ -102,8 +100,6 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
     return (
         avg_loss,
         avg_seg_loss,
-        avg_align_loss,
-        avg_cls_loss,
         iou,
         precision,
         recall,
@@ -112,7 +108,7 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
 
 def validate(model, val_loader, loss_fc, device, epoch):
     model.eval()
-    total_loss = seg_loss_total = align_loss_total = cls_loss_total = 0.0
+    total_loss = seg_loss_total = 0.0
     iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
 
     with torch.no_grad():
@@ -135,8 +131,7 @@ def validate(model, val_loader, loss_fc, device, epoch):
 
             total_loss += loss.item()
             seg_loss_total += loss.item()
-            # align_loss_total += loss_components["align"].item()
-            # cls_loss_total += loss_components["cls"].item()
+
 
             outputs = torch.sigmoid(seg_logits).detach().cpu()
             labels = labels.cpu()
@@ -150,8 +145,7 @@ def validate(model, val_loader, loss_fc, device, epoch):
                 {
                     "Loss": f"{loss.item():.4f}",
                     # "Seg_L": f"{loss_components['seg']:.4f}",
-                    # "Align_L": f"{loss_components['align']:.4f}",
-                    # "Cls_L": f"{loss_components['cls']:.4f}",
+
                 }
             )
     avg_loss = total_loss / len(val_loader)
@@ -166,8 +160,6 @@ def validate(model, val_loader, loss_fc, device, epoch):
     return (
         avg_loss,
         avg_seg_loss,
-        avg_align_loss,
-        avg_cls_loss,
         iou,
         precision,
         recall,
@@ -349,12 +341,12 @@ def main():
 
         for epoch in range(config["num_epochs"]):
             
-            train_loss, train_seg_loss, train_align_loss, train_cls_loss, \
+            train_loss, train_seg_loss, \
             train_iou, train_precision, train_recall, train_f1 = train_one_epoch(
                 model, train_loader, optimizer, loss_fc, device, epoch + 1
             )
 
-            val_loss, val_seg_loss, val_align_loss, val_cls_loss, \
+            val_loss, val_seg_loss, \
             val_iou, val_precision, val_recall, val_f1 = validate(
                 model, val_loader, loss_fc, device, epoch + 1
             )
@@ -372,10 +364,6 @@ def main():
                     "Train_info/Loss/Val": val_loss,
                     "Train_info/Seg_Loss/Train": train_seg_loss,
                     "Train_info/Seg_Loss/Val": val_seg_loss,
-                    "Train_info/Align_Loss/Train": train_align_loss,
-                    "Train_info/Align_Loss/Val": val_align_loss,
-                    "Train_info/Cls_Loss/Train": train_cls_loss,
-                    "Train_info/Cls_Loss/Val": val_cls_loss,
                     "Train_info/IoU/Train": train_iou,
                     "Train_info/IoU/Val": val_iou,
                     "Train_info/F1/Train": train_f1,
