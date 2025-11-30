@@ -114,44 +114,126 @@ class CNNEncoderWithFusion(nn.Module):
         
         return f_global, f_medium, f_detail
 
-# --- ViT Encoder using timm ---
+# --- ViT Encoder using timm with Manual Weight Loading ---
+from torch.hub import load_state_dict_from_url
+
 class ViTEncoder(nn.Module):
-    """ ViT-Tiny Encoder using timm """
+    """ ViT-Tiny Encoder using timm with robust weight loading """
     def __init__(self, img_size=256, in_chans=2, pretrained=True, pretrained_path=None):
         super(ViTEncoder, self).__init__()
         
-        # Use deit_tiny_patch16_224
-        # timm handles in_chans adaptation and img_size interpolation
+        # Create model without pretrained weights initially
+        # We will load them manually to avoid timm's HF download issues
         self.model = timm.create_model(
             'deit_tiny_patch16_224',
-            pretrained=pretrained,
+            pretrained=False,
             img_size=img_size,
-            in_chans=in_chans,
-            checkpoint_path=pretrained_path if pretrained_path else ''
+            in_chans=in_chans
         )
         
-        # Remove classifier to save memory (optional, but good practice)
+        # Remove classifier
         self.model.reset_classifier(0)
         
         self.embed_dim = self.model.embed_dim
-        self.patch_size = 16 # Known for deit_tiny_patch16_224
+        self.patch_size = 16
+        
+        if pretrained:
+            self.load_weights(pretrained_path)
+
+    def load_weights(self, pretrained_path):
+        # Official DeiT-Tiny URL (Facebook) - usually more accessible than HF
+        url = "https://dl.fbaipublicfiles.com/deit/deit_tiny_patch16_224-a1311bcf.pth"
+        
+        try:
+            if pretrained_path and os.path.exists(pretrained_path):
+                print(f"Loading pretrained weights from local path: {pretrained_path}")
+                checkpoint = torch.load(pretrained_path, map_location='cpu')
+            else:
+                print(f"Downloading pretrained weights from: {url}")
+                checkpoint = load_state_dict_from_url(url, map_location='cpu', check_hash=True)
+            
+            state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
+            
+            # Adapt weights for timm model
+            # 1. Patch Embedding: Adapt 3 channels -> in_chans (2)
+            if 'patch_embed.proj.weight' in state_dict:
+                weight = state_dict['patch_embed.proj.weight']
+                if weight.shape[1] != self.model.patch_embed.proj.weight.shape[1]:
+                    print(f"Adapting patch_embed from {weight.shape[1]} to {self.model.patch_embed.proj.weight.shape[1]} channels.")
+                    new_weight = weight[:, :self.model.patch_embed.proj.weight.shape[1], :, :]
+                    state_dict['patch_embed.proj.weight'] = new_weight
+
+            # 2. Positional Embedding: Interpolate if needed
+            if 'pos_embed' in state_dict:
+                pos_embed = state_dict['pos_embed']
+                # timm's pos_embed might include cls token, check shapes
+                if pos_embed.shape != self.model.pos_embed.shape:
+                    print(f"Resizing pos_embed from {pos_embed.shape} to {self.model.pos_embed.shape}.")
+                    # Remove cls token for resizing
+                    num_extra_tokens = 2 # DeiT has cls + dist
+                    # Check if checkpoint has 1 or 2 extra tokens
+                    # This logic assumes we are loading DeiT-Tiny
+                    
+                    # Extract tokens
+                    # DeiT: [1, 198, 192] -> 196 patches + 1 cls + 1 dist
+                    # timm deit_tiny: [1, 198, 192] (if img_size=224)
+                    
+                    # If target size is different, we need to interpolate
+                    # Separate extra tokens
+                    # Note: timm's deit_tiny might handle dist token differently depending on config
+                    # But standard deit_tiny has 2 extra tokens.
+                    
+                    # Simple resize strategy:
+                    # 1. Identify patch tokens
+                    # 2. Resize patch tokens
+                    # 3. Concatenate back
+                    
+                    # However, timm provides a utility for this: checkpoint_seq
+                    # But we are doing manual load.
+                    
+                    # Let's try to load with strict=False first, and if pos_embed mismatches, we fix it.
+                    # Actually, we should fix it before loading.
+                    
+                    # Assume standard DeiT-Tiny checkpoint structure
+                    n_tokens = pos_embed.shape[1]
+                    patch_embed_len = n_tokens - 2 # cls + dist
+                    size = int(math.sqrt(patch_embed_len))
+                    
+                    cls_dist_tokens = pos_embed[:, :2, :]
+                    patch_tokens = pos_embed[:, 2:, :]
+                    
+                    patch_tokens = patch_tokens.transpose(1, 2).reshape(1, self.embed_dim, size, size)
+                    
+                    # Target size
+                    new_size = self.model.patch_embed.num_patches ** 0.5
+                    new_size = int(new_size)
+                    
+                    patch_tokens = F.interpolate(patch_tokens, size=(new_size, new_size), mode='bilinear', align_corners=False)
+                    patch_tokens = patch_tokens.flatten(2).transpose(1, 2)
+                    
+                    new_pos_embed = torch.cat((cls_dist_tokens, patch_tokens), dim=1)
+                    state_dict['pos_embed'] = new_pos_embed
+
+            # Load weights
+            msg = self.model.load_state_dict(state_dict, strict=False)
+            print(f"Pretrained weights loaded with msg: {msg}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to load pretrained weights: {e}")
+            print("Training will proceed with random initialization for ViT.")
 
     def forward(self, x):
         # x: (B, C, H, W)
         
         # forward_features returns (B, N, C)
-        # For DeiT, N = num_patches + 2 (cls + dist)
         x = self.model.forward_features(x)
         
-        # We need to extract the patch tokens and reshape them
-        # The patch tokens are at the end
+        # Extract patch tokens (remove cls and dist tokens)
+        # timm's forward_features for DeiT keeps them
+        
+        # Check number of extra tokens
         n_patches = self.model.patch_embed.num_patches
-        
-        # Check if we have extra tokens (cls, dist)
-        # x.shape[1] should be n_patches + n_extra
-        
         if x.shape[1] > n_patches:
-            # Take the last n_patches
             x = x[:, -n_patches:, :]
             
         B, N, C = x.shape
