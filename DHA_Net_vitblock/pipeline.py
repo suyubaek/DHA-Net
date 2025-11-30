@@ -297,7 +297,9 @@ def main():
         # 模型初始化
         model = Model(
             in_channels=config['in_channels'],
-            num_classes=config['num_classes']
+            num_classes=config['num_classes'],
+            img_size=config.get('image_size', 256),
+            pretrained_path=config.get('pretrained_weight_path', None)
         )
         model = model.to(device)
         wandb.watch(model, log="all", log_freq=100)

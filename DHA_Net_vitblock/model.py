@@ -2,7 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
+import timm
+import math
 
+# --- Attention Blocks (Same as original) ---
 class ChannelAttention(nn.Module):
     def __init__(self, in_channels, reduction_ratio=16):
         super(ChannelAttention, self).__init__()
@@ -49,11 +52,11 @@ class DualAttentionBlock(nn.Module):
         x = x * self.sa(x)
         return x
 
-
-class CNNEncoder(nn.Module):
-    """ResNet-34 Encoder"""
+# --- CNN Encoder with Internal Fusion ---
+class CNNEncoderWithFusion(nn.Module):
+    """ResNet-34 Encoder with Internal Fusion"""
     def __init__(self, in_channels=2):
-        super(CNNEncoder, self).__init__()
+        super(CNNEncoderWithFusion, self).__init__()
         # Load pretrained weights
         resnet = models.resnet34(weights=models.ResNet34_Weights.IMAGENET1K_V1)
         
@@ -61,109 +64,110 @@ class CNNEncoder(nn.Module):
         if in_channels != 3:
             old_conv = resnet.conv1
             new_conv = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
-            
-            # Initialize with first 'in_channels' of pretrained weights (e.g. R, G)
-            # User suggestion: R and G weights are better than random or average for SAR
             with torch.no_grad():
                 new_conv.weight.copy_(old_conv.weight[:, :in_channels, :, :])
-            
-            self.stem = nn.Sequential(
-                new_conv,
-                resnet.bn1,
-                resnet.relu,
-                resnet.maxpool
-            )
+            self.stem = nn.Sequential(new_conv, resnet.bn1, resnet.relu, resnet.maxpool)
         else:
-            self.stem = nn.Sequential(
-                resnet.conv1,
-                resnet.bn1,
-                resnet.relu,
-                resnet.maxpool
-            )
+            self.stem = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool)
             
-        self.layer1 = resnet.layer1 # 64
-        self.layer2 = resnet.layer2 # 128
-        self.layer3 = resnet.layer3 # 256
-        self.layer4 = resnet.layer4 # 512
+        self.layer1 = resnet.layer1 # 64, 1/4
+        self.layer2 = resnet.layer2 # 128, 1/8
+        self.layer3 = resnet.layer3 # 256, 1/16
+        self.layer4 = resnet.layer4 # 512, 1/32
         
-    def forward(self, x):
-        x = self.stem(x)
-        c1 = self.layer1(x)
-        c2 = self.layer2(c1)
-        c3 = self.layer3(c2)
-        c4 = self.layer4(c3)
-        return c1, c2, c3, c4
-
-class ViTEncoder(nn.Module):
-    """Swin Transformer Tiny Encoder"""
-    def __init__(self, in_channels=2):
-        super(ViTEncoder, self).__init__()
-        # Use torchvision's swin_t
-        self.adapter = nn.Conv2d(in_channels, 3, 1)
-        swin = models.swin_t(weights=models.Swin_T_Weights.IMAGENET1K_V1)
-        self.features = swin.features
+        # Internal Fusion Layers
+        # Global (1/32) -> Medium (1/16) -> Detail (1/4)
         
-    def forward(self, x):
-        x = self.adapter(x)
-        
-        # Swin Transformer features structure:
-        # 0: PatchPartition + LinearEmbedding
-        # 1: Stage 1 Blocks
-        # 2: PatchMerging
-        # 3: Stage 2 Blocks
-        # 4: PatchMerging
-        # 5: Stage 3 Blocks
-        # 6: PatchMerging
-        # 7: Stage 4 Blocks
-        
-        # Stage 1 (Output 1/4)
-        x = self.features[0](x)
-        x = self.features[1](x)
-        s1 = x.permute(0, 3, 1, 2) # BHWC -> BCHW
-        
-        # Stage 2 (Output 1/8)
-        x = self.features[2](x)
-        x = self.features[3](x)
-        s2 = x.permute(0, 3, 1, 2)
-        
-        # Stage 3 (Output 1/16)
-        x = self.features[4](x)
-        x = self.features[5](x)
-        s3 = x.permute(0, 3, 1, 2)
-        
-        # Stage 4 (Output 1/32)
-        x = self.features[6](x)
-        x = self.features[7](x)
-        s4 = x.permute(0, 3, 1, 2)
-        
-        return s1, s2, s3, s4
-
-
-class FusionBlock(nn.Module):
-    def __init__(self, cnn_channels, vit_channels, out_channels):
-        super(FusionBlock, self).__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(cnn_channels + vit_channels, out_channels, 1, bias=False),
-            nn.BatchNorm2d(out_channels),
+        # Fusion for Medium: c3 (256) + upsampled Global (512) -> 256
+        self.fuse_medium = nn.Sequential(
+            nn.Conv2d(256 + 512, 256, 1, bias=False),
+            nn.BatchNorm2d(256),
             nn.ReLU(inplace=True)
         )
-        self.att = DualAttentionBlock(out_channels)
         
-    def forward(self, cnn_feat, vit_feat):
-        # Ensure sizes match (ViT might have slight rounding diffs if not exact)
-        if cnn_feat.shape[2:] != vit_feat.shape[2:]:
-            vit_feat = F.interpolate(vit_feat, size=cnn_feat.shape[2:], mode='bilinear', align_corners=True)
+        # Fusion for Detail: c1 (64) + upsampled Medium (256) -> 64
+        # Note: Using c1 for 1/4 scale detail
+        self.fuse_detail = nn.Sequential(
+            nn.Conv2d(64 + 256, 64, 1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        x = self.stem(x)
+        c1 = self.layer1(x) # 1/4, 64
+        c2 = self.layer2(c1) # 1/8, 128
+        c3 = self.layer3(c2) # 1/16, 256
+        c4 = self.layer4(c3) # 1/32, 512
+        
+        # Internal Fusion
+        # 1. Global: c4
+        f_global = c4
+        
+        # 2. Medium: c3 + upsampled Global
+        f_global_up = F.interpolate(f_global, size=c3.shape[2:], mode='bilinear', align_corners=True)
+        f_medium = self.fuse_medium(torch.cat([c3, f_global_up], dim=1))
+        
+        # 3. Detail: c1 + upsampled Medium
+        f_medium_up = F.interpolate(f_medium, size=c1.shape[2:], mode='bilinear', align_corners=True)
+        f_detail = self.fuse_detail(torch.cat([c1, f_medium_up], dim=1))
+        
+        return f_global, f_medium, f_detail
+
+# --- ViT Encoder using timm ---
+class ViTEncoder(nn.Module):
+    """ ViT-Tiny Encoder using timm """
+    def __init__(self, img_size=256, in_chans=2, pretrained=True, pretrained_path=None):
+        super(ViTEncoder, self).__init__()
+        
+        # Use deit_tiny_patch16_224
+        # timm handles in_chans adaptation and img_size interpolation
+        self.model = timm.create_model(
+            'deit_tiny_patch16_224',
+            pretrained=pretrained,
+            img_size=img_size,
+            in_chans=in_chans,
+            checkpoint_path=pretrained_path if pretrained_path else ''
+        )
+        
+        # Remove classifier to save memory (optional, but good practice)
+        self.model.reset_classifier(0)
+        
+        self.embed_dim = self.model.embed_dim
+        self.patch_size = 16 # Known for deit_tiny_patch16_224
+
+    def forward(self, x):
+        # x: (B, C, H, W)
+        
+        # forward_features returns (B, N, C)
+        # For DeiT, N = num_patches + 2 (cls + dist)
+        x = self.model.forward_features(x)
+        
+        # We need to extract the patch tokens and reshape them
+        # The patch tokens are at the end
+        n_patches = self.model.patch_embed.num_patches
+        
+        # Check if we have extra tokens (cls, dist)
+        # x.shape[1] should be n_patches + n_extra
+        
+        if x.shape[1] > n_patches:
+            # Take the last n_patches
+            x = x[:, -n_patches:, :]
             
-        x = torch.cat([cnn_feat, vit_feat], dim=1)
-        x = self.conv(x)
-        x = self.att(x)
+        B, N, C = x.shape
+        
+        # Reshape to (B, C, H, W)
+        H_feat = int(math.sqrt(N))
+        W_feat = int(math.sqrt(N))
+        
+        x = x.transpose(1, 2).reshape(B, C, H_feat, W_feat)
+        
         return x
 
-class DecoderBlock(nn.Module):
+# --- Decoder & Model ---
+class DecoderFusionBlock(nn.Module):
     def __init__(self, in_channels, skip_channels, out_channels):
-        super(DecoderBlock, self).__init__()
-        # Use Transposed Convolution for upsampling
-        self.up = nn.ConvTranspose2d(in_channels, in_channels, kernel_size=2, stride=2)
+        super(DecoderFusionBlock, self).__init__()
         
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels + skip_channels, out_channels, 3, padding=1, bias=False),
@@ -176,7 +180,6 @@ class DecoderBlock(nn.Module):
         self.att = DualAttentionBlock(out_channels)
 
     def forward(self, x, skip):
-        x = self.up(x)
         if x.shape[2:] != skip.shape[2:]:
              x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=True)
         x = torch.cat([x, skip], dim=1)
@@ -184,70 +187,84 @@ class DecoderBlock(nn.Module):
         x = self.att(x)
         return x
 
-
 class Model(nn.Module):
-    def __init__(self, in_channels=2, num_classes=1):
+    def __init__(self, in_channels=2, num_classes=1, img_size=256, pretrained_path=None):
         super(Model, self).__init__()
         
         # Encoders
-        self.cnn_encoder = CNNEncoder(in_channels)
-        self.vit_encoder = ViTEncoder(in_channels)
+        self.cnn_encoder = CNNEncoderWithFusion(in_channels)
+        
+        # ViT-Tiny Encoder (timm)
+        self.vit_encoder = ViTEncoder(
+            img_size=img_size, 
+            in_chans=in_channels, 
+            pretrained=True,
+            pretrained_path=pretrained_path
+        )
         
         # Channel configs
-        # ResNet34: 64, 128, 256, 512
-        # Swin-T:   96, 192, 384, 768
+        # CNN Outputs:
+        # Global: 512 (1/32)
+        # Medium: 256 (1/16)
+        # Detail: 64  (1/4)
         
-        # Fusion Blocks
-        self.fuse1 = FusionBlock(64, 96, 64)    # 1/4
-        self.fuse2 = FusionBlock(128, 192, 128) # 1/8
-        self.fuse3 = FusionBlock(256, 384, 256) # 1/16
-        self.fuse4 = FusionBlock(512, 768, 512) # 1/32
+        # ViT Output: 192 (1/16) for deit_tiny
+        vit_dim = 192
         
-        # Decoder
-        # Input to decoder is fused4 (512)
-        self.dec4 = DecoderBlock(512, 256, 256) # 512 + 256(skip) -> 256
-        self.dec3 = DecoderBlock(256, 128, 128) # 256 + 128(skip) -> 128
-        self.dec2 = DecoderBlock(128, 64, 64)   # 128 + 64(skip)  -> 64
+        # Decoder Stages
+        
+        # Stage 1: Fuse Global (512, 1/32) and ViT (192, 1/16)
+        # We upsample Global to 1/16 and fuse with ViT
+        self.fuse_stage1 = DecoderFusionBlock(512, vit_dim, 512) # Output 512, 1/16
+        
+        # Stage 2: Fuse Stage1 (512, 1/16) and Medium (256, 1/16)
+        self.fuse_stage2 = DecoderFusionBlock(512, 256, 256) # Output 256, 1/16
+        
+        # Stage 3: Fuse Stage2 (256, 1/16) and Detail (64, 1/4)
+        # Upsample Stage2 to 1/4
+        self.fuse_stage3 = DecoderFusionBlock(256, 64, 128) # Output 128, 1/4
         
         # Final layers
         self.final_up = nn.Upsample(scale_factor=4, mode='bilinear', align_corners=True) # 1/4 -> 1
         self.final_conv = nn.Sequential(
-            nn.Conv2d(64, 32, 3, padding=1, bias=False),
-            nn.BatchNorm2d(32),
+            nn.Conv2d(128, 64, 3, padding=1, bias=False),
+            nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.Conv2d(32, num_classes, 1)
+            nn.Conv2d(64, num_classes, 1)
         )
 
     def forward(self, x):
         # Encoders
-        c1, c2, c3, c4 = self.cnn_encoder(x)
-        v1, v2, v3, v4 = self.vit_encoder(x)
-        
-        # Fusion
-        f1 = self.fuse1(c1, v1) # 1/4, 64
-        f2 = self.fuse2(c2, v2) # 1/8, 128
-        f3 = self.fuse3(c3, v3) # 1/16, 256
-        f4 = self.fuse4(c4, v4) # 1/32, 512
+        f_global, f_medium, f_detail = self.cnn_encoder(x)
+        f_vit = self.vit_encoder(x) # 1/16
         
         # Decoder
-        d4 = self.dec4(f4, f3) # -> 1/16, 256
-        d3 = self.dec3(d4, f2) # -> 1/8, 128
-        d2 = self.dec2(d3, f1) # -> 1/4, 64
+        # Stage 1: Global (upsampled) + ViT
+        d1 = self.fuse_stage1(f_global, f_vit) # 1/16
+        
+        # Stage 2: d1 + Medium
+        d2 = self.fuse_stage2(d1, f_medium) # 1/16
+        
+        # Stage 3: d2 (upsampled) + Detail
+        d3 = self.fuse_stage3(d2, f_detail) # 1/4
         
         # Final Output
-        out = self.final_up(d2)
+        out = self.final_up(d3)
         out = self.final_conv(out)
         
         return out
 
 if __name__ == "__main__":
     # Test
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = Model(in_channels=2, num_classes=1).to(device)
-    dummy_input = torch.randn(2, 2, 256, 256).to(device)
-    output = model(dummy_input)
-    print(f"Input: {dummy_input.shape}")
-    print(f"Output: {output.shape}")
-    
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"Total Parameters: {total_params / 1e6:.2f} M")
+    try:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = Model(in_channels=2, num_classes=1).to(device)
+        dummy_input = torch.randn(2, 2, 256, 256).to(device)
+        output = model(dummy_input)
+        print(f"Input: {dummy_input.shape}")
+        print(f"Output: {output.shape}")
+        
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"Total Parameters: {total_params / 1e6:.2f} M")
+    except Exception as e:
+        print(f"Error during test: {e}")
