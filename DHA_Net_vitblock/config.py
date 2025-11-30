@@ -16,7 +16,7 @@ config = {
 
     'learning_rate': 3e-4,
     'min_lr': 1e-6,
-    'weight_decay': 1e-3,
+    'weight_decay': 1e-2,
     'num_epochs': 300,
     'warmup_epochs': 10,
 

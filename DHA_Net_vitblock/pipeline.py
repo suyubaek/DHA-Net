@@ -315,9 +315,59 @@ def main():
         )
 
         # 优化器和学习率调度器
+        # 优化器配置 (Differential LR + Weight Decay Exclusion)
+        def get_optimizer_groups(model, base_lr, weight_decay):
+            # 分离 Encoder (Pretrained) 和 Decoder (Scratch)
+            # Encoder 使用较小的 LR (0.1 * base_lr)
+            # Decoder 使用 base_lr
+            
+            # 分离需 Weight Decay 的参数 (Weights) 和不需的参数 (Biases, Norms)
+            
+            encoder_params = []
+            decoder_params = []
+            
+            # 识别 Encoder 模块
+            encoder_modules = [model.cnn_encoder, model.vit_encoder]
+            encoder_ids = list(map(id, model.cnn_encoder.parameters())) + list(map(id, model.vit_encoder.parameters()))
+            
+            # 收集参数
+            for name, param in model.named_parameters():
+                if not param.requires_grad:
+                    continue
+                
+                # 判断是否属于 Encoder
+                is_encoder = False
+                # 简单判断：检查 param 是否在 encoder_ids 中
+                # 注意：这种 id 检查在某些 DDP 设置下可能失效，但在单机多卡/单卡下通常有效
+                # 更稳健的方法是根据 name 前缀
+                if name.startswith('cnn_encoder') or name.startswith('vit_encoder'):
+                    is_encoder = True
+                
+                # 判断是否应用 Weight Decay
+                # 通常 Bias 和 Norm (LayerNorm, BatchNorm) 不应用 WD
+                no_decay = False
+                if param.ndim <= 1 or name.endswith(".bias") or "norm" in name or "bn" in name:
+                    no_decay = True
+                
+                # 分组
+                group = {
+                    'params': [param],
+                    'weight_decay': 0.0 if no_decay else weight_decay,
+                    'lr': base_lr * 0.1 if is_encoder else base_lr
+                }
+                
+                if is_encoder:
+                    encoder_params.append(group)
+                else:
+                    decoder_params.append(group)
+            
+            return encoder_params + decoder_params
+
+        optimizer_groups = get_optimizer_groups(model, config["learning_rate"], config["weight_decay"])
+        
         optimizer = optim.AdamW(
-            model.parameters(),
-            lr=config["learning_rate"],
+            optimizer_groups,
+            lr=config["learning_rate"], # Default LR (will be overridden by groups)
             weight_decay=config["weight_decay"],
         )
         warmup_scheduler = LinearLR(
