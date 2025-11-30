@@ -169,49 +169,55 @@ class ViTEncoder(nn.Module):
                 # timm's pos_embed might include cls token, check shapes
                 if pos_embed.shape != self.model.pos_embed.shape:
                     print(f"Resizing pos_embed from {pos_embed.shape} to {self.model.pos_embed.shape}.")
-                    # Remove cls token for resizing
-                    num_extra_tokens = 2 # DeiT has cls + dist
-                    # Check if checkpoint has 1 or 2 extra tokens
-                    # This logic assumes we are loading DeiT-Tiny
                     
+                    # Determine number of extra tokens in the CHECKPOINT
+                    n_tokens_ckpt = pos_embed.shape[1]
+                    # Try to find a square grid size that fits
+                    # Case 1: 1 extra token (CLS)
+                    if int(math.sqrt(n_tokens_ckpt - 1))**2 == n_tokens_ckpt - 1:
+                        num_extra_tokens_ckpt = 1
+                    # Case 2: 2 extra tokens (CLS + DIST)
+                    elif int(math.sqrt(n_tokens_ckpt - 2))**2 == n_tokens_ckpt - 2:
+                        num_extra_tokens_ckpt = 2
+                    else:
+                        # Fallback or error
+                        print(f"Warning: Could not determine grid size for {n_tokens_ckpt} tokens. Assuming 1 extra token.")
+                        num_extra_tokens_ckpt = 1
+                        
                     # Extract tokens
-                    # DeiT: [1, 198, 192] -> 196 patches + 1 cls + 1 dist
-                    # timm deit_tiny: [1, 198, 192] (if img_size=224)
+                    cls_dist_tokens = pos_embed[:, :num_extra_tokens_ckpt, :]
+                    patch_tokens = pos_embed[:, num_extra_tokens_ckpt:, :]
                     
-                    # If target size is different, we need to interpolate
-                    # Separate extra tokens
-                    # Note: timm's deit_tiny might handle dist token differently depending on config
-                    # But standard deit_tiny has 2 extra tokens.
-                    
-                    # Simple resize strategy:
-                    # 1. Identify patch tokens
-                    # 2. Resize patch tokens
-                    # 3. Concatenate back
-                    
-                    # However, timm provides a utility for this: checkpoint_seq
-                    # But we are doing manual load.
-                    
-                    # Let's try to load with strict=False first, and if pos_embed mismatches, we fix it.
-                    # Actually, we should fix it before loading.
-                    
-                    # Assume standard DeiT-Tiny checkpoint structure
-                    n_tokens = pos_embed.shape[1]
-                    patch_embed_len = n_tokens - 2 # cls + dist
-                    size = int(math.sqrt(patch_embed_len))
-                    
-                    cls_dist_tokens = pos_embed[:, :2, :]
-                    patch_tokens = pos_embed[:, 2:, :]
-                    
+                    # Reshape patch tokens to square grid
+                    size = int(math.sqrt(patch_tokens.shape[1]))
                     patch_tokens = patch_tokens.transpose(1, 2).reshape(1, self.embed_dim, size, size)
                     
-                    # Target size
-                    new_size = self.model.patch_embed.num_patches ** 0.5
-                    new_size = int(new_size)
+                    # Target size (from model)
+                    new_size = int(self.model.patch_embed.num_patches ** 0.5)
                     
+                    # Interpolate
                     patch_tokens = F.interpolate(patch_tokens, size=(new_size, new_size), mode='bilinear', align_corners=False)
                     patch_tokens = patch_tokens.flatten(2).transpose(1, 2)
                     
-                    new_pos_embed = torch.cat((cls_dist_tokens, patch_tokens), dim=1)
+                    # Handle mismatch in extra tokens between checkpoint and model
+                    # Model's extra tokens
+                    num_extra_tokens_model = self.model.pos_embed.shape[1] - self.model.patch_embed.num_patches
+                    
+                    if num_extra_tokens_model == num_extra_tokens_ckpt:
+                        new_pos_embed = torch.cat((cls_dist_tokens, patch_tokens), dim=1)
+                    elif num_extra_tokens_model == 1 and num_extra_tokens_ckpt == 2:
+                        # Model expects 1, Checkpoint has 2 (Distilled -> Non-Distilled)
+                        # Use only CLS token (first one)
+                        new_pos_embed = torch.cat((cls_dist_tokens[:, 0:1, :], patch_tokens), dim=1)
+                    elif num_extra_tokens_model == 2 and num_extra_tokens_ckpt == 1:
+                        # Model expects 2, Checkpoint has 1 (Non-Distilled -> Distilled)
+                        # Duplicate CLS token for DIST
+                        new_pos_embed = torch.cat((cls_dist_tokens, cls_dist_tokens, patch_tokens), dim=1)
+                    else:
+                         print(f"Warning: Token count mismatch unhandled. Model extra: {num_extra_tokens_model}, Ckpt extra: {num_extra_tokens_ckpt}")
+                         # Try best effort concatenation
+                         new_pos_embed = torch.cat((cls_dist_tokens, patch_tokens), dim=1)
+
                     state_dict['pos_embed'] = new_pos_embed
 
             # Load weights
