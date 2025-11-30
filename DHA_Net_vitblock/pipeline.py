@@ -14,7 +14,7 @@ from tqdm import tqdm
 import wandb
 
 from model import Model
-from loss_function import DiceFocalLoss
+from loss_function import DiceBCELoss
 from dataprocess import get_loaders, S1WaterDataset
 from config import config
 from metrics import calculate_metrics
@@ -76,21 +76,27 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
     model.train()
     total_loss = seg_loss_total = 0.0
     iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
-
+    metric_count = 0
+    
+    # Initialize GPU Augmentor
     augmentor = GPUAugmentor(rotate_prob=0.5, noise_prob=0.5)
-
+    
     pbar = tqdm(train_loader, desc=f"Training Epoch {epoch}")
     for batch_idx, batch in enumerate(pbar):
-        images, labels, _ = batch
+        images, labels, class_labels = batch
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
+        class_labels = class_labels.to(device, non_blocking=True)
 
+        # Apply GPU Augmentation
         with torch.no_grad():
             images, labels = augmentor(images, labels)
 
         optimizer.zero_grad()
+        
         seg_logits = model(images)
         if isinstance(seg_logits, list):
+            # Deep supervision case
             loss = 0
             for logits in seg_logits:
                 loss += loss_fc(logits, labels)
@@ -105,27 +111,32 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
 
         total_loss += loss.item()
         seg_loss_total += loss.item()
-
-        outputs = torch.sigmoid(seg_logits).detach()
-        cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels)
-        iou += cur_iou
-        precision += cur_precision
-        recall += cur_recall
-        f1 += cur_f1
+        
+        # Calculate metrics every 50 batches
+        if (batch_idx + 1) % 50 == 0:
+            outputs = torch.sigmoid(seg_logits).detach()
+            cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels)
+            iou += cur_iou
+            precision += cur_precision
+            recall += cur_recall
+            f1 += cur_f1
+            metric_count += 1
 
         pbar.set_postfix(
             {
-                "Loss": f"{loss.item():.4f}"
+                "Loss": f"{loss.item():.4f}",
             }
         )
     
     avg_loss = total_loss / len(train_loader)
     avg_seg_loss = seg_loss_total / len(train_loader)
-    iou /= len(train_loader)
-    precision /= len(train_loader)
-    recall /= len(train_loader)
-    f1 /= len(train_loader)
-
+    
+    if metric_count > 0:
+        iou /= metric_count
+        precision /= metric_count
+        recall /= metric_count
+        f1 /= metric_count
+    
     return (
         avg_loss,
         avg_seg_loss,
@@ -137,15 +148,16 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
 
 def validate(model, val_loader, loss_fc, device, epoch):
     model.eval()
-    total_loss = seg_loss_total = align_loss_total = cls_loss_total = 0.0
+    total_loss = seg_loss_total = 0.0
     iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
 
     with torch.no_grad():
         pbar = tqdm(val_loader, desc=f"Validation Epoch {epoch}")
         for batch_idx, batch in enumerate(pbar):
-            images, labels, _ = batch
+            images, labels, class_labels = batch
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
+            class_labels = class_labels.to(device, non_blocking=True)
 
             seg_logits = model(images)
             if isinstance(seg_logits, list):
@@ -160,8 +172,7 @@ def validate(model, val_loader, loss_fc, device, epoch):
             total_loss += loss.item()
             seg_loss_total += loss.item()
 
-            outputs = torch.sigmoid(seg_logits).detach().cpu()
-            labels = labels.cpu()
+            outputs = torch.sigmoid(seg_logits).detach()
             cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels)
             iou += cur_iou
             precision += cur_precision
@@ -198,9 +209,10 @@ def test(model, test_loader, loss_fc, device):
     with torch.no_grad():
         pbar = tqdm(test_loader, desc="Testing")
         for batch_idx, batch in enumerate(pbar):
-            images, labels, _ = batch
+            images, labels, class_labels = batch
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
+            class_labels = class_labels.to(device, non_blocking=True)
 
             seg_logits = model(images)
             if isinstance(seg_logits, list):
@@ -215,8 +227,7 @@ def test(model, test_loader, loss_fc, device):
             total_loss += loss.item()
             seg_loss_total += loss.item()
 
-            outputs = torch.sigmoid(seg_logits).detach().cpu()
-            labels = labels.cpu()
+            outputs = torch.sigmoid(seg_logits).detach()
             cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels)
             iou += cur_iou
             precision += cur_precision
@@ -258,7 +269,7 @@ def main():
         project="LanCang River",
         name=experiment_name,
         config=config,
-        tags=["GCAFF"],
+        tags=["DHA"],
     )
 
     try:
@@ -272,7 +283,8 @@ def main():
         vis_dataset = S1WaterDataset(
             data_dir=config["data_root"],
             split='vis',
-            override_stats=(train_loader.dataset.mean.squeeze(), train_loader.dataset.std.squeeze())
+            override_stats=(train_loader.dataset.mean.squeeze(), train_loader.dataset.std.squeeze()),
+            preload=False
         )
         vis_loader = torch.utils.data.DataLoader(
             vis_dataset,
@@ -359,7 +371,7 @@ def main():
         best_iou, report_iou = 0.0, 0.0
         best_epoch = -1
         best_model_path = os.path.join(checkpoint_dir, "best_model.pth")
-        loss_fc = DiceFocalLoss(alpha=0.2).to(device)
+        loss_fc = DiceBCELoss(dice_weight=0.5, bce_weight=0.5).to(device)
 
         for epoch in range(config["num_epochs"]):
             
@@ -376,8 +388,7 @@ def main():
             scheduler.step()
 
             wandb.log(
-                {   
-                    "Epoch": epoch + 1,
+                {   "Epoch": epoch + 1,
                     "Comparison Board/IoU": val_iou,
                     "Comparison Board/F1": val_f1,
                     "Comparison Board/Precision": val_precision,

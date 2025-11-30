@@ -265,21 +265,21 @@ def get_loaders(data_dir,
         seed=seed,
         preload=True
     )
-    
     val_dataset = S1WaterDataset(
         data_dir=data_dir,
         split='val',
         override_stats=(train_dataset.mean.squeeze(), train_dataset.std.squeeze()),
         preload=True
     )
-
     test_dataset = S1WaterDataset(
         data_dir=data_dir,
         split='test',
         override_stats=(train_dataset.mean.squeeze(), train_dataset.std.squeeze()),
         preload=False
     )
+
     
+    # 3. 创建 Dataloaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
