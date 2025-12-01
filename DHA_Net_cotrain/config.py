@@ -1,0 +1,26 @@
+config = {
+    'seed': 3047,
+    'device': 'cuda',
+
+    'data_root': '/mnt/data1/rove/dataset/S1_Water',
+    'batch_size': 16,
+    'num_workers': 16,
+
+    'model_name': 'DHA_Net',
+    'in_channels': 2,
+    'num_classes': 1,
+    'use_bilinear': True,
+    'image_size': 512,
+    'patch_size': 16,
+
+    'learning_rate': 3e-4,
+    'min_lr': 1e-6,
+    'weight_decay': 1e-3,
+    'num_epochs': 300, # Total epochs (legacy)
+    'cls_epochs': 50,  # Stage 1 epochs
+    'seg_epochs': 250, # Stage 2 epochs
+    'cls_lr': 1e-4,    # Stage 1 learning rate
+    'warmup_epochs': 10,
+
+    'save_dir': './runs'
+}
