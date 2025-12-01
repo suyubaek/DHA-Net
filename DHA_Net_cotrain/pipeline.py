@@ -12,6 +12,7 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
 import wandb
+from sklearn.metrics import roc_auc_score, precision_score, recall_score, accuracy_score
 
 from model import Model
 from loss_function import DiceBCELoss
@@ -266,16 +267,18 @@ def test(model, test_loader, loss_fc, device):
 def train_cls_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
     model.train()
     total_loss = 0.0
-    correct = 0
-    total = 0
+    
+    all_targets = []
+    all_preds = []
+    all_probs = []
     
     pbar = tqdm(train_loader, desc=f"Stage 1 (CLS) Training Epoch {epoch}")
     for batch in pbar:
         images, _, cls_labels = batch # Ignore masks
         images = images.to(device, non_blocking=True)
         
-        # Convert labels: 0 -> 0 (No Water), 1/2 -> 1 (Water)
-        targets = (cls_labels > 0).float().unsqueeze(1).to(device, non_blocking=True)
+        # Labels are already 0 or 1 from dataprocess
+        targets = cls_labels.float().unsqueeze(1).to(device, non_blocking=True)
         
         optimizer.zero_grad()
         
@@ -287,39 +290,73 @@ def train_cls_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
         
         total_loss += loss.item()
         
-        # Accuracy
-        preds = (torch.sigmoid(logits) > 0.5).float()
-        correct += (preds == targets).sum().item()
-        total += targets.size(0)
+        probs = torch.sigmoid(logits)
+        preds = (probs > 0.5).float()
         
-        pbar.set_postfix({"CLS Loss": f"{loss.item():.4f}", "Acc": f"{correct/total:.4f}"})
+        all_targets.extend(targets.cpu().numpy())
+        all_preds.extend(preds.detach().cpu().numpy())
+        all_probs.extend(probs.detach().cpu().numpy())
         
-    return total_loss / len(train_loader), correct / total
+        pbar.set_postfix({"CLS Loss": f"{loss.item():.4f}"})
+        
+    # Calculate Metrics
+    all_targets = np.array(all_targets)
+    all_preds = np.array(all_preds)
+    all_probs = np.array(all_probs)
+    
+    acc = accuracy_score(all_targets, all_preds)
+    precision = precision_score(all_targets, all_preds, zero_division=0)
+    recall = recall_score(all_targets, all_preds, zero_division=0)
+    try:
+        auc = roc_auc_score(all_targets, all_probs)
+    except ValueError:
+        auc = 0.5 # Handle case with only one class
+        
+    return total_loss / len(train_loader), acc, precision, recall, auc
 
 def validate_cls(model, val_loader, loss_fc, device, epoch):
     model.eval()
     total_loss = 0.0
-    correct = 0
-    total = 0
+    
+    all_targets = []
+    all_preds = []
+    all_probs = []
     
     with torch.no_grad():
         pbar = tqdm(val_loader, desc=f"Stage 1 (CLS) Validation Epoch {epoch}")
         for batch in pbar:
             images, _, cls_labels = batch
             images = images.to(device, non_blocking=True)
-            targets = (cls_labels > 0).float().unsqueeze(1).to(device, non_blocking=True)
+            targets = cls_labels.float().unsqueeze(1).to(device, non_blocking=True)
             
             logits = model(images, mode='cls')
             loss = loss_fc(logits, targets)
             
             total_loss += loss.item()
-            preds = (torch.sigmoid(logits) > 0.5).float()
-            correct += (preds == targets).sum().item()
-            total += targets.size(0)
             
-            pbar.set_postfix({"Val CLS Loss": f"{loss.item():.4f}", "Val Acc": f"{correct/total:.4f}"})
+            probs = torch.sigmoid(logits)
+            preds = (probs > 0.5).float()
             
-    return total_loss / len(val_loader), correct / total
+            all_targets.extend(targets.cpu().numpy())
+            all_preds.extend(preds.detach().cpu().numpy())
+            all_probs.extend(probs.detach().cpu().numpy())
+            
+            pbar.set_postfix({"Val CLS Loss": f"{loss.item():.4f}"})
+            
+    # Calculate Metrics
+    all_targets = np.array(all_targets)
+    all_preds = np.array(all_preds)
+    all_probs = np.array(all_probs)
+    
+    acc = accuracy_score(all_targets, all_preds)
+    precision = precision_score(all_targets, all_preds, zero_division=0)
+    recall = recall_score(all_targets, all_preds, zero_division=0)
+    try:
+        auc = roc_auc_score(all_targets, all_probs)
+    except ValueError:
+        auc = 0.5
+            
+    return total_loss / len(val_loader), acc, precision, recall, auc
 
 def main():
     # 设置随机种子
@@ -399,25 +436,27 @@ def main():
         cls_optimizer = optim.AdamW(model.parameters(), lr=config['cls_lr'], weight_decay=config['weight_decay'])
         cls_loss_fc = torch.nn.BCEWithLogitsLoss().to(device)
         
-        best_cls_acc = 0.0
+        best_cls_auc = 0.0
         
         for epoch in range(config['cls_epochs']):
-            train_loss, train_acc = train_cls_one_epoch(model, train_loader, cls_optimizer, cls_loss_fc, device, epoch + 1)
-            val_loss, val_acc = validate_cls(model, val_loader, cls_loss_fc, device, epoch + 1)
+            train_loss, train_acc, train_prec, train_rec, train_auc = train_cls_one_epoch(model, train_loader, cls_optimizer, cls_loss_fc, device, epoch + 1)
+            val_loss, val_acc, val_prec, val_rec, val_auc = validate_cls(model, val_loader, cls_loss_fc, device, epoch + 1)
             
             wandb.log({
-                "Stage1/Train_Loss": train_loss, "Stage1/Train_Acc": train_acc,
-                "Stage1/Val_Loss": val_loss, "Stage1/Val_Acc": val_acc,
+                "Stage1/Train_Loss": train_loss, "Stage1/Train_Recall": train_rec, "Stage1/Train_AUC": train_auc,
+                "Stage1/Val_Loss": val_loss, "Stage1/Val_Recall": val_rec, "Stage1/Val_AUC": val_auc,
+                "Stage1/Val_Precision": val_prec,
                 "Stage1/Epoch": epoch + 1
             })
             
-            logging.info(f"Stage 1 Epoch {epoch+1}: Train Acc {train_acc:.4f}, Val Acc {val_acc:.4f}")
+            logging.info(f"Stage 1 Epoch {epoch+1}: Val Recall {val_rec:.4f}, Val AUC {val_auc:.4f}, Val Prec {val_prec:.4f}")
             
-            if val_acc > best_cls_acc:
-                best_cls_acc = val_acc
+            if val_auc > best_cls_auc:
+                best_cls_auc = val_auc
                 torch.save(model.state_dict(), os.path.join(checkpoint_dir, "best_cls_model.pth"))
+                logging.info(f"New best CLS model saved with AUC: {best_cls_auc:.4f}")
         
-        logging.info(f"Stage 1 Finished. Best Acc: {best_cls_acc:.4f}")
+        logging.info(f"Stage 1 Finished. Best AUC: {best_cls_auc:.4f}")
         
         # Load best classification weights
         model.load_state_dict(torch.load(os.path.join(checkpoint_dir, "best_cls_model.pth")))

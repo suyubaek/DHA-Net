@@ -177,14 +177,16 @@ class S1WaterDataset(Dataset):
         return mean, std
 
     def _infer_cls_label(self, mask: torch.Tensor) -> torch.Tensor:
-        has_water = torch.any(mask > 0)
-        has_land = torch.any(mask == 0)
-        if has_water and has_land:
-            cls_id = 1  # 混合
-        elif has_water:
-            cls_id = 2  # 纯水
+        water_pixels = (mask > 0).sum().item()
+        total_pixels = mask.numel()
+        water_ratio = water_pixels / total_pixels
+        
+        # New definition: Water sample if water ratio > 1%
+        if water_ratio > 0.01:
+            cls_id = 1 # Water (Positive)
         else:
-            cls_id = 0  # 纯陆地
+            cls_id = 0 # No Water (Negative)
+            
         return torch.tensor(cls_id, dtype=torch.long)
 
     def __len__(self):
