@@ -263,14 +263,14 @@ def get_loaders(data_dir,
         split='train',
         neg_sample_ratio=neg_sample_ratio,
         seed=seed,
-        preload=True
+        preload=False
     )
     
     val_dataset = S1WaterDataset(
         data_dir=data_dir,
         split='val',
         override_stats=(train_dataset.mean.squeeze(), train_dataset.std.squeeze()),
-        preload=True
+        preload=False
     )
     
     # 3. 创建 Dataloaders

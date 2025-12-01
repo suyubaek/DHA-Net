@@ -3,10 +3,10 @@ config = {
     'device': 'cuda',
 
     'data_root': '/mnt/data1/rove/dataset/S1_Water',
-    'batch_size': 16,
+    'batch_size': 64,
     'num_workers': 8,
 
-    'model_name': 'DHA_Net',
+    'model_name': 'DHA_Net_ViT_Tiny',
     'in_channels': 2,
     'num_classes': 1,
     'use_bilinear': True,

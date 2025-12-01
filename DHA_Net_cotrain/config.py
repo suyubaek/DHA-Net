@@ -4,9 +4,9 @@ config = {
 
     'data_root': '/mnt/data1/rove/dataset/S1_Water',
     'batch_size': 16,
-    'num_workers': 16,
+    'num_workers': 8,
 
-    'model_name': 'DHA_Net',
+    'model_name': 'DHA_Net_CoTrain',
     'in_channels': 2,
     'num_classes': 1,
     'use_bilinear': True,
