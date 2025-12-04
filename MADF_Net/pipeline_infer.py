@@ -12,7 +12,7 @@ from model import Model
 # Configuration
 # --------------------------------------------------------------------------------
 # 1. Paths
-MODEL_WEIGHTS_PATH = "checkpoints/DHA_Net_1125/best_model.pth" 
+MODEL_WEIGHTS_PATH = "checkpoints/MADF_Net_1128/best_model.pth" 
 INFERENCE_FILE_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/2412_rec_vv_vh.tif"
 GT_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/watermask2412.tif"
 ROI_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/roi_mask.tif"
@@ -235,7 +235,7 @@ def main():
     print(f"Using device: {device}")
 
     # Setup Model
-    PATCH_SIZE = config['image_size']
+    PATCH_SIZE = 256
     STRIDE = PATCH_SIZE // 2
     
     model = Model(in_channels=config['in_channels'], num_classes=config['num_classes']).to(device)
