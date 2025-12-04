@@ -16,7 +16,7 @@ MODEL_WEIGHTS_PATH = "checkpoints/Nested_UNet_1120/best_model.pth"
 INFERENCE_FILE_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/2412_rec_vv_vh.tif"
 GT_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/watermask2412.tif"
 ROI_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/roi_mask.tif"
-RESULT_SAVE_PATH = f"./results/lancang_river_{config['model_name']}.tif"
+RESULT_SAVE_PATH = f"./lancang_infer/lancang_river_{config['model_name']}.tif"
 
 # 2. Normalization (Must match training)
 NORM_MEAN = [-1148.2476, -1944.6511]
