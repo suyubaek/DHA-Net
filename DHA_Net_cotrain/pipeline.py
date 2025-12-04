@@ -428,6 +428,17 @@ def main():
             ],
         )
 
+        send_message(
+            title=f"实验开始: {experiment_name}",
+            content=(
+                f"开始时间: {start_time.strftime('%Y-%m-%d %H:%M')}\n"
+                f"模型: {config['model_name']}\n"
+                f"总参数: {total_params:,}\n"
+                f"可训练参数: {trainable_params:,}\n"
+                f"训练轮数: {config['num_epochs']}\n"
+                f"学习率: {config['learning_rate']}\n"
+            )
+        )
         logging.info(f"实验开始: {experiment_name}")
         start_time = datetime.now()
         

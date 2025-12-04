@@ -234,7 +234,8 @@ def get_loaders(data_dir,
                 batch_size, 
                 num_workers,
                 neg_sample_ratio=1.0, 
-                seed=42):
+                seed=42,
+                preload=False,):
     """
     创建 train 和 val Dataloaders。
     
@@ -263,14 +264,14 @@ def get_loaders(data_dir,
         split='train',
         neg_sample_ratio=neg_sample_ratio,
         seed=seed,
-        preload=True
+        preload=preload
     )
     
     val_dataset = S1WaterDataset(
         data_dir=data_dir,
         split='val',
         override_stats=(train_dataset.mean.squeeze(), train_dataset.std.squeeze()),
-        preload=True
+        preload=preload
     )
     
     # 3. 创建 Dataloaders
@@ -326,19 +327,32 @@ if __name__ == '__main__':
     DATA_ROOT = "/mnt/data1/rove/dataset/S1_Water" # 您的主 S1_Water 目录
     BATCH_SIZE = 32
     NUM_WORKERS = 4
-    
-    # !! 在这里测试您的新参数 !!
-    # 第一次运行会很慢，第二次运行会立即加载
     NEG_RATIO = 0.3
 
-    train_loader, val_loader = get_loaders(
+    # 1. 获取 Loader
+    train_loader, val_loader, test_loader = get_loaders(
         data_dir=DATA_ROOT,
         batch_size=BATCH_SIZE,
         num_workers=NUM_WORKERS,
-        neg_sample_ratio=NEG_RATIO, # <-- 传入参数
+        neg_sample_ratio=NEG_RATIO, 
         seed=3047
     )
     
+    # 2. 获取 Dataset 对象 (Loader.dataset)
+    train_dataset = train_loader.dataset
+    
+    # 3. 提取并打印 Mean 和 Std
+    # 注意：dataset.mean 是 tensor 格式，我们需要转成 list 并保留小数
+    mean_val = train_dataset.mean.view(-1).tolist()
+    std_val = train_dataset.std.view(-1).tolist()
+    
+    print("\n" + "="*40)
+    print(">>> 请将以下结果复制到 pipeline_infer.py <<<")
+    print("="*40)
+    print(f"NORM_MEAN = [{mean_val[0]:.4f}, {mean_val[1]:.4f}]")
+    print(f"NORM_STD  = [{std_val[0]:.4f}, {std_val[1]:.4f}]")
+    print("="*40 + "\n")
+
     print(f"\nTrain Dataloader (采样率 {NEG_RATIO}): {len(train_loader)} 批次")
     print(f"Val Dataloader (完整):       {len(val_loader)} 批次")
     

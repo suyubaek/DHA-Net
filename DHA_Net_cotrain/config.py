@@ -3,7 +3,7 @@ config = {
     'device': 'cuda',
 
     'data_root': '/mnt/data1/rove/dataset/S1_Water',
-    'batch_size': 16,
+    'batch_size': 96,
     'num_workers': 8,
 
     'model_name': 'DHA_Net_CoTrain',
