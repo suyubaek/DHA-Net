@@ -16,14 +16,14 @@ MODEL_WEIGHTS_PATH = "checkpoints/DHA_Net_1125/best_model.pth"
 INFERENCE_FILE_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/2412_rec_vv_vh.tif"
 GT_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/watermask2412.tif"
 ROI_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/roi_mask.tif"
-RESULT_SAVE_PATH = "./results/research_area_result.tif"
+RESULT_SAVE_PATH = f"./results/lancang_river_{config['model_name']}.tif"
 
 # 2. Normalization (Must match training)
 NORM_MEAN = [-1148.2476, -1944.6511]
 NORM_STD  = [594.0617, 973.9897]
 
 # 3. Inference Settings
-INFER_BATCH_SIZE = 32
+INFER_BATCH_SIZE = 256
 INFER_NUM_WORKERS = 8
 
 class SlidingWindowDataset(Dataset):
@@ -71,13 +71,33 @@ def predict_sliding_window(model, image_path, patch_size, stride, num_classes, m
     print(f"\n{'='*20} Step 1: Full Image Inference {'='*20}")
     print(f"Target File: {image_path}")
     
-    # 1. Read Image
+    # 1. Read Image & Preprocess
     with rasterio.open(image_path) as src:
         image = src.read() # (C, H, W)
         profile = src.profile
         image = image.astype(np.float32)
+        
+        print(f"Original Data Range: Min {np.nanmin(image):.2f}, Max {np.nanmax(image):.2f}")
+
+        # --- Fix 1: Scale Adjustment (dB -> Scaled Int16 domain) ---
+        # 训练数据看起来是 dB * 100，所以这里也要乘以 100
+        print("Applying scaling factor 100.0 to match training distribution...")
+        image = image * 100.0
+        if np.isnan(image).any():
+            print("Found NaN values. Filling with training mean...")
+            for c_idx in range(image.shape[0]):
+                fill_val = mean[c_idx] if c_idx < len(mean) else 0
+                
+                mask = np.isnan(image[c_idx])
+                nan_count = np.sum(mask)
+                
+                if nan_count > 0:
+                    image[c_idx][mask] = fill_val
+                    print(f"  Channel {c_idx}: Filled {nan_count} NaN pixels with {fill_val}")
+        
         c, h, w = image.shape
-        print(f"Original Size: {c}x{h}x{w}")
+        print(f"Processed Size: {c}x{h}x{w}")
+        print(f"Processed Data Range: Min {image.min():.2f}, Max {image.max():.2f}")
         
     # 2. Padding
     pad_h = stride - (h % stride) if h % stride != 0 else 0
@@ -157,7 +177,7 @@ def apply_roi_mask_and_save(prob_map, roi_path, save_path, profile):
 
     # Apply Mask: ROI==0 -> Background (0)
     # Threshold prediction first
-    pred_binary = (prob_map > 0.5).astype(np.uint8)
+    pred_binary = (prob_map > 0.3).astype(np.uint8)
     
     # Masking
     final_result = pred_binary * (roi_mask > 0).astype(np.uint8)

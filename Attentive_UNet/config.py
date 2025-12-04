@@ -10,7 +10,7 @@ config = {
     'in_channels': 2,
     'num_classes': 1,
     'use_bilinear': True,
-    'image_size': 512,
+    'image_size': 256,
 
     'learning_rate': 3e-4,
     'min_lr': 1e-6,

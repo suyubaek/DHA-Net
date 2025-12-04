@@ -8,22 +8,15 @@ from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, r
 from config import config
 from model import Model
 
-# --------------------------------------------------------------------------------
-# Configuration
-# --------------------------------------------------------------------------------
-# 1. Paths
+
 MODEL_WEIGHTS_PATH = "checkpoints/MADF_Net_1128/best_model.pth" 
 INFERENCE_FILE_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/2412_rec_vv_vh.tif"
 GT_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/watermask2412.tif"
 ROI_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/roi_mask.tif"
-RESULT_SAVE_PATH = "./results/research_area_result.tif"
-
-# 2. Normalization (Must match training)
+RESULT_SAVE_PATH = f"./results/lancang_river_{config['model_name']}.tif"
 NORM_MEAN = [-1148.2476, -1944.6511]
 NORM_STD  = [594.0617, 973.9897]
-
-# 3. Inference Settings
-INFER_BATCH_SIZE = 32
+INFER_BATCH_SIZE = 256
 INFER_NUM_WORKERS = 8
 
 class SlidingWindowDataset(Dataset):
@@ -71,13 +64,30 @@ def predict_sliding_window(model, image_path, patch_size, stride, num_classes, m
     print(f"\n{'='*20} Step 1: Full Image Inference {'='*20}")
     print(f"Target File: {image_path}")
     
-    # 1. Read Image
+    # 1. Read Image & Preprocess
     with rasterio.open(image_path) as src:
         image = src.read() # (C, H, W)
         profile = src.profile
         image = image.astype(np.float32)
+        print(f"Original Data Range: Min {np.nanmin(image):.2f}, Max {np.nanmax(image):.2f}")
+
+        print("Applying scaling factor 100.0 to match training distribution...")
+        image = image * 100.0
+        if np.isnan(image).any():
+            print("Found NaN values. Filling with training mean...")
+            for c_idx in range(image.shape[0]):
+                fill_val = mean[c_idx] if c_idx < len(mean) else 0
+                
+                mask = np.isnan(image[c_idx])
+                nan_count = np.sum(mask)
+                
+                if nan_count > 0:
+                    image[c_idx][mask] = fill_val
+                    print(f"  Channel {c_idx}: Filled {nan_count} NaN pixels with {fill_val}")
+        
         c, h, w = image.shape
-        print(f"Original Size: {c}x{h}x{w}")
+        print(f"Processed Size: {c}x{h}x{w}")
+        print(f"Processed Data Range: Min {image.min():.2f}, Max {image.max():.2f}")
         
     # 2. Padding
     pad_h = stride - (h % stride) if h % stride != 0 else 0
@@ -235,7 +245,7 @@ def main():
     print(f"Using device: {device}")
 
     # Setup Model
-    PATCH_SIZE = 256
+    PATCH_SIZE = config['image_size']
     STRIDE = PATCH_SIZE // 2
     
     model = Model(in_channels=config['in_channels'], num_classes=config['num_classes']).to(device)
@@ -278,8 +288,6 @@ def main():
                 print("GT_PATH not found. Skipping evaluation.")
         else:
             print("ROI_PATH not found. Skipping masking and evaluation.")
-            # Save raw result if ROI missing
-            # ... (Optional)
     else:
         print("Inference file not found.")
 
