@@ -4,15 +4,25 @@ import rasterio
 from tqdm import tqdm
 import os
 from torch.utils.data import Dataset, DataLoader
+from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, cohen_kappa_score
 from config import config
 from model import Model
 
-# 推理参数设置
+# --------------------------------------------------------------------------------
+# Configuration
+# --------------------------------------------------------------------------------
+# 1. Paths
 MODEL_WEIGHTS_PATH = "checkpoints/DHA_Net_1125/best_model.pth" 
 INFERENCE_FILE_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/2412_rec_vv_vh.tif"
+GT_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/watermask2412.tif"
+ROI_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/roi_mask.tif"
 RESULT_SAVE_PATH = "./results/research_area_result.tif"
+
+# 2. Normalization (Must match training)
 NORM_MEAN = [-1148.2476, -1944.6511]
 NORM_STD  = [594.0617, 973.9897]
+
+# 3. Inference Settings
 INFER_BATCH_SIZE = 32
 INFER_NUM_WORKERS = 8
 
@@ -30,25 +40,20 @@ class SlidingWindowDataset(Dataset):
         return len(self.rows) * len(self.cols)
 
     def __getitem__(self, idx):
-        # 计算当前 idx 对应的行列索引
         r_idx = idx // len(self.cols)
         c_idx = idx % len(self.cols)
         
         r = self.rows[r_idx]
         c = self.cols[c_idx]
         
-        # 切片 (C, H, W)
         patch = self.image[:, r:r+self.patch_size, c:c+self.patch_size]
         
-        # 转 Tensor 并标准化
         patch_tensor = torch.from_numpy(patch).float()
         patch_tensor = (patch_tensor - self.mean) / self.std
         
-        # 返回 patch 和 它的坐标，以便拼回去
         return patch_tensor, r, c
 
 def get_gaussian_mask(size, sigma_scale=1.0/8):
-    """生成高斯权重掩膜"""
     tmp = np.zeros((size, size))
     center = size // 2
     sig = size * sigma_scale
@@ -56,21 +61,25 @@ def get_gaussian_mask(size, sigma_scale=1.0/8):
     mask = np.exp(-(x**2 + y**2) / (2 * sig**2))
     return mask
 
-def predict_sliding_window(model, image_path, save_path, patch_size, stride, num_classes, mean, std, device):
-    print(f"\n{'='*20} 开始处理 {'='*20}")
-    print(f"目标文件: {image_path}")
+def predict_sliding_window(model, image_path, patch_size, stride, num_classes, mean, std, device):
+    """
+    Step 1: Full Image Inference
+    Returns:
+        prob_map (np.ndarray): The raw probability map (0-1) of shape (H, W).
+        profile (dict): Rasterio profile for saving.
+    """
+    print(f"\n{'='*20} Step 1: Full Image Inference {'='*20}")
+    print(f"Target File: {image_path}")
     
-    # 1. 读取图像
-    print(f"[1/6] 正在读取图像数据...")
+    # 1. Read Image
     with rasterio.open(image_path) as src:
         image = src.read() # (C, H, W)
         profile = src.profile
         image = image.astype(np.float32)
         c, h, w = image.shape
-        print(f"      -> 原始尺寸: {c}x{h}x{w}")
+        print(f"Original Size: {c}x{h}x{w}")
         
     # 2. Padding
-    print(f"[2/6] 正在进行边缘填充 (Padding)...")
     pad_h = stride - (h % stride) if h % stride != 0 else 0
     pad_w = stride - (w % stride) if w % stride != 0 else 0
     if h + pad_h < patch_size: pad_h = patch_size - h
@@ -78,17 +87,12 @@ def predict_sliding_window(model, image_path, save_path, patch_size, stride, num
 
     image_padded = np.pad(image, ((0, 0), (0, pad_h), (0, pad_w)), mode='reflect')
     _, h_pad, w_pad = image_padded.shape
-    print(f"      -> 填充后尺寸: {image_padded.shape}")
     
-    # 3. 准备坐标列表
-    print(f"[3/6] 计算滑动窗口坐标...")
+    # 3. Coordinates
     rows = list(range(0, h_pad - patch_size + 1, stride))
     cols = list(range(0, w_pad - patch_size + 1, stride))
-    total_patches = len(rows) * len(cols)
-    print(f"      -> 总计切片数量: {total_patches}")
     
-    # 4. 构建 Dataset 和 DataLoader
-    print(f"[4/6] 初始化 DataLoader (Workers: {INFER_NUM_WORKERS})...")
+    # 4. DataLoader
     dataset = SlidingWindowDataset(image_padded, rows, cols, patch_size, mean, std)
     loader = DataLoader(
         dataset, 
@@ -98,83 +102,142 @@ def predict_sliding_window(model, image_path, save_path, patch_size, stride, num
         pin_memory=True
     )
     
-    # 5. 准备结果容器 (修改点：放在 CPU 上)
-    print(f"[5/6] 在 CPU RAM 上分配结果容器 (节省显存)...")
-    # 注意：这里 device='cpu'
+    # 5. Result Containers (CPU)
     prob_map = torch.zeros((num_classes, h_pad, w_pad), dtype=torch.float32, device='cpu')
     weight_map = torch.zeros((h_pad, w_pad), dtype=torch.float32, device='cpu')
     
-    # 高斯掩膜还是放在 GPU 上，用于加速计算
     gaussian_mask = get_gaussian_mask(patch_size)
     gaussian_mask_tensor = torch.from_numpy(gaussian_mask).float().to(device)
     
     model.eval()
     
-    # 6. 批量推理
-    print(f"[6/6] 开始批量推理 (Batch Size: {INFER_BATCH_SIZE})...")
+    # 6. Inference
+    print(f"Starting Inference (Batch Size: {INFER_BATCH_SIZE})...")
     with torch.no_grad():
-        for batch_patches, batch_r, batch_c in tqdm(loader, desc="推理进度", unit="batch", leave=True):
-            # batch_patches: (B, C, H, W) -> GPU
+        for batch_patches, batch_r, batch_c in tqdm(loader, desc="Inference Progress", unit="batch"):
             batch_patches = batch_patches.to(device)
             
-            # GPU 推理
             outputs = model(batch_patches)
-            outputs = torch.sigmoid(outputs) # (B, 1, H, W)
+            outputs = torch.sigmoid(outputs)
+            outputs = outputs * gaussian_mask_tensor
             
-            # 在 GPU 上先乘好高斯权重 (利用 GPU 并行计算优势)
-            # 此时 outputs 还在 GPU 上
-            outputs = outputs * gaussian_mask_tensor # 广播乘法
-            
-            # 将计算好的加权结果移回 CPU 进行拼图
             outputs_cpu = outputs.cpu() 
             
             for i in range(outputs_cpu.shape[0]):
                 r = batch_r[i].item()
                 c = batch_c[i].item()
                 
-                # 取出单个 patch (已经在 CPU 上了)
                 weighted_patch = outputs_cpu[i].squeeze(0) 
-                
-                # 累加到 CPU 大图上
                 prob_map[:, r:r+patch_size, c:c+patch_size] += weighted_patch
-                
-                # 权重图累加 (gaussian_mask_tensor 也要转回 CPU)
-                # 为了效率，可以在循环外生成一个 cpu 版的 mask，或者这里转一次
                 weight_map[r:r+patch_size, c:c+patch_size] += gaussian_mask_tensor.cpu()
 
-    # 7. 归一化与保存 (全部在 CPU 上进行)
-    print(f"\n正在保存结果到磁盘...")
-    
-    # 避免除以 0
+    # 7. Normalize & Crop
     weight_map = torch.where(weight_map == 0, torch.ones_like(weight_map), weight_map)
     prob_map /= weight_map
-    
-    # 裁剪掉 Padding
     prob_map = prob_map[:, :h, :w]
     
-    # 生成掩膜 (修改为 0/255)
-    result_mask = ((prob_map > 0.5).float().numpy() * 255).astype(np.uint8)
+    # Return numpy array (H, W)
+    return prob_map.squeeze(0).numpy(), profile
+
+def apply_roi_mask_and_save(prob_map, roi_path, save_path, profile):
+    """
+    Step 2: ROI Masking & Saving
+    """
+    print(f"\n{'='*20} Step 2: ROI Masking & Saving {'='*20}")
+    
+    # Load ROI
+    with rasterio.open(roi_path) as src:
+        roi_mask = src.read(1) # (H, W)
+        
+    if roi_mask.shape != prob_map.shape:
+        print(f"Warning: ROI shape {roi_mask.shape} != Prediction shape {prob_map.shape}. Resizing ROI...")
+        # Simple resize if needed, but ideally they should match
+        # For now assume they match or raise error
+        raise ValueError(f"Shape mismatch: ROI {roi_mask.shape} vs Pred {prob_map.shape}")
+
+    # Apply Mask: ROI==0 -> Background (0)
+    # Threshold prediction first
+    pred_binary = (prob_map > 0.5).astype(np.uint8)
+    
+    # Masking
+    final_result = pred_binary * (roi_mask > 0).astype(np.uint8)
+    
+    # Save
+    final_result_save = (final_result * 255).astype(np.uint8)
     
     profile.update(dtype=rasterio.uint8, count=1, compress='lzw')
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     
     with rasterio.open(save_path, 'w', **profile) as dst:
-        dst.write(result_mask[0], 1)
+        dst.write(final_result_save, 1)
         
-    print(f"完成! 结果已保存至: {save_path}")
-    print(f"{'='*50}\n")
+    print(f"Masked result saved to: {save_path}")
+    return final_result
 
-if __name__ == "__main__":
+def evaluate_metrics(pred_binary, gt_path, roi_path):
+    """
+    Step 3: Accuracy Evaluation (Inside ROI Only)
+    """
+    print(f"\n{'='*20} Step 3: Accuracy Evaluation {'='*20}")
+    
+    # Load GT and ROI
+    with rasterio.open(gt_path) as src:
+        gt = src.read(1)
+    with rasterio.open(roi_path) as src:
+        roi = src.read(1)
+        
+    # Ensure shapes match
+    if gt.shape != pred_binary.shape:
+        raise ValueError(f"GT shape {gt.shape} != Pred shape {pred_binary.shape}")
+        
+    # Flatten arrays
+    gt_flat = gt.flatten()
+    pred_flat = pred_binary.flatten()
+    roi_flat = roi.flatten()
+    
+    # Select only valid ROI pixels
+    valid_indices = roi_flat > 0
+    
+    y_true = gt_flat[valid_indices]
+    y_pred = pred_flat[valid_indices]
+    
+    # Binarize GT if needed (e.g. if 255 is water)
+    y_true = (y_true > 0).astype(np.uint8)
+    
+    print(f"Evaluating on {len(y_true)} pixels within ROI...")
+    
+    # Calculate Metrics
+    # Confusion Matrix
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    
+    # IoU
+    iou = tp / (tp + fp + fn + 1e-6)
+    
+    # Precision, Recall, F1, OA
+    precision = precision_score(y_true, y_pred, zero_division=0)
+    recall = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    oa = accuracy_score(y_true, y_pred)
+    kappa = cohen_kappa_score(y_true, y_pred)
+    
+    print("-" * 30)
+    print(f"IoU:       {iou:.4f}")
+    print(f"F1-Score:  {f1:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall:    {recall:.4f}")
+    print(f"OA:        {oa:.4f}")
+    print(f"Kappa:     {kappa:.4f}")
+    print("-" * 30)
+    print(f"Confusion Matrix:\nTP={tp}, TN={tn}, FP={fp}, FN={fn}")
+
+def main():
     device = torch.device(config['device'] if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # Setup Model
     PATCH_SIZE = config['image_size'] // 2
     STRIDE = PATCH_SIZE // 2
     
-    print(f"Config Image Size: {config['image_size']}")
-    print(f"Inference Patch Size: {PATCH_SIZE}")
-    print(f"Inference Stride: {STRIDE}")
-
     model = Model(in_channels=config['in_channels'], num_classes=config['num_classes']).to(device)
     
     if os.path.exists(MODEL_WEIGHTS_PATH):
@@ -185,15 +248,17 @@ if __name__ == "__main__":
             model.load_state_dict(checkpoint['state_dict'])
         else:
             model.load_state_dict(checkpoint)
-        print(f"Model weights loaded from {MODEL_WEIGHTS_PATH}")
+        print(f"Model weights loaded.")
     else:
-        print(f"Warning: Model weights not found.")
+        print(f"Error: Weights not found at {MODEL_WEIGHTS_PATH}")
+        return
 
-    if os.path.exists(INFERENCE_FILE_PATH) and os.path.exists(MODEL_WEIGHTS_PATH):
-        predict_sliding_window(
+    # Workflow
+    if os.path.exists(INFERENCE_FILE_PATH):
+        # Step 1: Inference
+        prob_map, profile = predict_sliding_window(
             model=model,
             image_path=INFERENCE_FILE_PATH,
-            save_path=RESULT_SAVE_PATH,
             patch_size=PATCH_SIZE,
             stride=STRIDE,
             num_classes=config['num_classes'],
@@ -201,3 +266,22 @@ if __name__ == "__main__":
             std=NORM_STD,
             device=device
         )
+        
+        # Step 2: Masking & Saving
+        if os.path.exists(ROI_PATH):
+            final_pred = apply_roi_mask_and_save(prob_map, ROI_PATH, RESULT_SAVE_PATH, profile)
+            
+            # Step 3: Evaluation
+            if os.path.exists(GT_PATH):
+                evaluate_metrics(final_pred, GT_PATH, ROI_PATH)
+            else:
+                print("GT_PATH not found. Skipping evaluation.")
+        else:
+            print("ROI_PATH not found. Skipping masking and evaluation.")
+            # Save raw result if ROI missing
+            # ... (Optional)
+    else:
+        print("Inference file not found.")
+
+if __name__ == "__main__":
+    main()
