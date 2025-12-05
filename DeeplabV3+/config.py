@@ -6,7 +6,7 @@ config = {
     'batch_size': 16,
     'num_workers': 16,
 
-    'model_name': 'U_Net',
+    'model_name': 'DeeplabV3+',
     'in_channels': 2,
     'num_classes': 1,
     'use_bilinear': True,
