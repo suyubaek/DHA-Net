@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
+import math
 
 class ChannelAttention(nn.Module):
     def __init__(self, in_channels, reduction_ratio=16):
@@ -50,20 +51,76 @@ class DualAttentionBlock(nn.Module):
         return x
 
 
+class ASPPConv(nn.Sequential):
+    def __init__(self, in_channels, out_channels, dilation):
+        modules = [
+            nn.Conv2d(in_channels, out_channels, 3, padding=dilation, dilation=dilation, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        ]
+        super(ASPPConv, self).__init__(*modules)
+
+class ASPPPooling(nn.Sequential):
+    def __init__(self, in_channels, out_channels):
+        super(ASPPPooling, self).__init__(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True))
+
+    def forward(self, x):
+        size = x.shape[-2:]
+        x = super(ASPPPooling, self).forward(x)
+        return F.interpolate(x, size=size, mode='bilinear', align_corners=False)
+
+class ASPP(nn.Module):
+    def __init__(self, in_channels, atrous_rates, out_channels=256):
+        super(ASPP, self).__init__()
+        modules = []
+        # 1x1 conv
+        modules.append(nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)))
+
+        # Atrous convolutions
+        for rate in atrous_rates:
+            modules.append(ASPPConv(in_channels, out_channels, rate))
+
+        # Global Average Pooling
+        modules.append(ASPPPooling(in_channels, out_channels))
+
+        self.convs = nn.ModuleList(modules)
+        
+        # Project after concatenation
+        self.project = nn.Sequential(
+            nn.Conv2d(len(modules) * out_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5)
+        )
+
+    def forward(self, x):
+        res = []
+        for conv in self.convs:
+            res.append(conv(x))
+        res = torch.cat(res, dim=1)
+        return self.project(res)
+
+
 class CNNEncoder(nn.Module):
-    """ResNet-34 Encoder"""
+    """ResNet-50 Encoder"""
     def __init__(self, in_channels=2):
         super(CNNEncoder, self).__init__()
         # Load pretrained weights
-        resnet = models.resnet34(weights=models.ResNet34_Weights.IMAGENET1K_V1)
+        resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
         
         # Modify first layer for 2-channel input
         if in_channels != 3:
             old_conv = resnet.conv1
             new_conv = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
             
-            # Initialize with first 'in_channels' of pretrained weights (e.g. R, G)
-            # User suggestion: R and G weights are better than random or average for SAR
+            # Initialize with first 'in_channels' of pretrained weights
             with torch.no_grad():
                 new_conv.weight.copy_(old_conv.weight[:, :in_channels, :, :])
             
@@ -81,10 +138,10 @@ class CNNEncoder(nn.Module):
                 resnet.maxpool
             )
             
-        self.layer1 = resnet.layer1 # 64
-        self.layer2 = resnet.layer2 # 128
-        self.layer3 = resnet.layer3 # 256
-        self.layer4 = resnet.layer4 # 512
+        self.layer1 = resnet.layer1 # 256
+        self.layer2 = resnet.layer2 # 512
+        self.layer3 = resnet.layer3 # 1024
+        self.layer4 = resnet.layer4 # 2048
         
     def forward(self, x):
         x = self.stem(x)
@@ -94,79 +151,210 @@ class CNNEncoder(nn.Module):
         c4 = self.layer4(c3)
         return c1, c2, c3, c4
 
-class ViTEncoder(nn.Module):
-    """Swin Transformer Tiny Encoder"""
-    def __init__(self, in_channels=2):
-        super(ViTEncoder, self).__init__()
-        # Use torchvision's swin_t
-        self.adapter = nn.Conv2d(in_channels, 3, 1)
-        swin = models.swin_t(weights=models.Swin_T_Weights.IMAGENET1K_V1)
-        self.features = swin.features
+class DeiTTiny(nn.Module):
+    """Manual DeiT-Tiny Implementation with Pretrained Weights"""
+    def __init__(self, in_channels=2, img_size=256, patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4., pretrained=True):
+        super(DeiTTiny, self).__init__()
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.num_patches = (img_size // patch_size) ** 2
+        
+        # Patch Embedding
+        self.patch_embed = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
+        
+        # Class token and distill token 
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.dist_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches + 2, embed_dim))
+        self.pos_drop = nn.Dropout(p=0.0)
+        
+        # Encoder
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, 
+                                                   dim_feedforward=int(embed_dim * mlp_ratio), 
+                                                   activation='gelu', batch_first=True, norm_first=True)
+        self.blocks = nn.TransformerEncoder(encoder_layer, num_layers=depth)
+        self.norm = nn.LayerNorm(embed_dim)
+        
+        # Init weights
+        torch.nn.init.trunc_normal_(self.pos_embed, std=.02)
+        torch.nn.init.trunc_normal_(self.cls_token, std=.02)
+        torch.nn.init.trunc_normal_(self.dist_token, std=.02)
+        self.apply(self._init_weights)
+        
+        if pretrained:
+            self._load_pretrained_weights()
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            torch.nn.init.trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+            
+    def _load_pretrained_weights(self):
+        url = "https://dl.fbaipublicfiles.com/deit/deit_tiny_distilled_patch16_224-b40b3cf7.pth"
+        try:
+            state_dict = torch.hub.load_state_dict_from_url(url, map_location="cpu", check_hash=True)
+            if "model" in state_dict:
+                state_dict = state_dict["model"]
+            
+            new_dict = {}
+            for k, v in state_dict.items():
+                # Map keys from official DeiT to nn.TransformerEncoder structure
+                # Official: blocks.0.attn.qkv.weight -> Our: blocks.layers.0.self_attn.in_proj_weight
+                # Official: blocks.0.attn.proj.weight -> Our: blocks.layers.0.self_attn.out_proj.weight
+                # Official: blocks.0.mlp.fc1.weight -> Our: blocks.layers.0.linear1.weight
+                # Official: blocks.0.mlp.fc2.weight -> Our: blocks.layers.0.linear2.weight
+                # Official: blocks.0.norm1.weight -> Our: blocks.layers.0.norm1.weight
+                # Official: blocks.0.norm2.weight -> Our: blocks.layers.0.norm2.weight
+                
+                if "blocks" in k:
+                    parts = k.split(".")
+                    if len(parts) < 3:
+                        continue
+                    layer_idx = parts[1]
+                    module = parts[2] 
+                    
+                    prefix = f"blocks.layers.{layer_idx}"
+                    
+                    if module == "norm1":
+                        new_k = f"{prefix}.norm1.{parts[-1]}"
+                        new_dict[new_k] = v
+                    elif module == "norm2":
+                        new_k = f"{prefix}.norm2.{parts[-1]}"
+                        new_dict[new_k] = v
+                    elif module == "attn":
+                        if len(parts) < 4: continue
+                        sub = parts[3] # qkv or proj
+                        if sub == "qkv":
+                            new_k = f"{prefix}.self_attn.in_proj_{parts[-1]}" 
+                            new_dict[new_k] = v
+                        elif sub == "proj":
+                            new_k = f"{prefix}.self_attn.out_proj.{parts[-1]}"
+                            new_dict[new_k] = v
+                    elif module == "mlp":
+                        if len(parts) < 4: continue
+                        sub = parts[3] # fc1 or fc2
+                        if sub == "fc1":
+                            new_k = f"{prefix}.linear1.{parts[-1]}"
+                            new_dict[new_k] = v
+                        elif sub == "fc2":
+                            new_k = f"{prefix}.linear2.{parts[-1]}"
+                            new_dict[new_k] = v
+                elif "patch_embed.proj" in k:
+                    # Resize patch_embed if channels mismatch (3 vs 2)
+                    if "weight" in k and v.ndim >= 2 and v.shape[1] == 3 and self.patch_embed.weight.shape[1] != 3:
+                        print(f"Adapting patch_embed from 3 to {self.patch_embed.weight.shape[1]} channels")
+                        v_new = v[:, :self.patch_embed.weight.shape[1], :, :]
+                        new_dict["patch_embed.weight"] = v_new
+                    else:
+                        new_k = k.replace("patch_embed.proj", "patch_embed")
+                        new_dict[new_k] = v
+                        
+                elif k in ["cls_token", "dist_token", "pos_embed"]:
+                     if k == "pos_embed":
+                         # Resize pos_embed
+                         # Pretrained: (1, 198, 192) -> (1, 14*14+2, 192) = (1, 198, 192). 
+                         # If img_size=256, patches=16 -> 16*16=256 patches. Total 258.
+                         # Need to interpolate pos_embed.
+                         n_tokens = 2 # cls + dist
+                         old_pos = v
+                         new_pos = self.pos_embed
+                         if old_pos.shape != new_pos.shape:
+                             print(f"Interpolating pos_embed: {old_pos.shape} -> {new_pos.shape}")
+                             # Extract tokens
+                             old_pos_tokens = old_pos[:, :n_tokens]
+                             old_pos_grid = old_pos[:, n_tokens:]
+                             
+                             # Reshape grid to square
+                             gs_old = int(math.sqrt(old_pos_grid.shape[1]))
+                             old_pos_grid = old_pos_grid.transpose(1, 2).reshape(1, self.embed_dim, gs_old, gs_old)
+                             
+                             # Interpolate
+                             gs_new = int(math.sqrt(new_pos.shape[1] - n_tokens))
+                             new_pos_grid = F.interpolate(old_pos_grid, size=(gs_new, gs_new), mode='bilinear', align_corners=False)
+                             new_pos_grid = new_pos_grid.flatten(2).transpose(1, 2)
+                             
+                             new_v = torch.cat([old_pos_tokens, new_pos_grid], dim=1)
+                             new_dict[k] = new_v
+                         else:
+                             new_dict[k] = v
+                     else:
+                        new_dict[k] = v
+                elif k in ["norm.weight", "norm.bias"]:
+                    new_dict[k] = v
+            
+            # Load
+            msg = self.load_state_dict(new_dict, strict=False)
+            print(f"Loaded DeiT Pretrained Weights: {msg}")
+            
+        except Exception as e:
+            print(f"Failed to load DeiT weights: {e}")
+            print("Proceeding with random initialization for ViT.")
+
+    def forward(self, x):
+        B = x.shape[0]
+        # Patch Embed
+        x = self.patch_embed(x).flatten(2).transpose(1, 2) # B, N, C
+        
+        # Add Tokens
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        dist_tokens = self.dist_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, dist_tokens, x), dim=1)
+        
+        # Pos Embed
+        x = x + self.pos_embed
+        x = self.pos_drop(x)
+        
+        # Transformer
+        x = self.blocks(x)
+        x = self.norm(x)
+        
+        # Remove tokens and reshape
+        x = x[:, 2:] # Skip cls and dist
+        H = W = int(math.sqrt(self.num_patches))
+        x = x.permute(0, 2, 1).reshape(B, self.embed_dim, H, W)
+        
+        return x
+
+# ------------------------------------------------------------------------------
+# 4. Decoders & Smoothing
+# ------------------------------------------------------------------------------
+
+class SmoothBlock(nn.Module):
+    """Smoothes skip connections with 1x1 then 3x3 to reduce noise."""
+    def __init__(self, in_channels, out_channels):
+        super(SmoothBlock, self).__init__()
+        self.reduce = nn.Conv2d(in_channels, out_channels, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        
+        self.smooth = nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
         
     def forward(self, x):
-        x = self.adapter(x)
-        
-        # Swin Transformer features structure:
-        # 0: PatchPartition + LinearEmbedding
-        # 1: Stage 1 Blocks
-        # 2: PatchMerging
-        # 3: Stage 2 Blocks
-        # 4: PatchMerging
-        # 5: Stage 3 Blocks
-        # 6: PatchMerging
-        # 7: Stage 4 Blocks
-        
-        # Stage 1 (Output 1/4)
-        x = self.features[0](x)
-        x = self.features[1](x)
-        s1 = x.permute(0, 3, 1, 2) # BHWC -> BCHW
-        
-        # Stage 2 (Output 1/8)
-        x = self.features[2](x)
-        x = self.features[3](x)
-        s2 = x.permute(0, 3, 1, 2)
-        
-        # Stage 3 (Output 1/16)
-        x = self.features[4](x)
-        x = self.features[5](x)
-        s3 = x.permute(0, 3, 1, 2)
-        
-        # Stage 4 (Output 1/32)
-        x = self.features[6](x)
-        x = self.features[7](x)
-        s4 = x.permute(0, 3, 1, 2)
-        
-        return s1, s2, s3, s4
-
-
-class FusionBlock(nn.Module):
-    def __init__(self, cnn_channels, vit_channels, out_channels):
-        super(FusionBlock, self).__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(cnn_channels + vit_channels, out_channels, 1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-        self.att = DualAttentionBlock(out_channels)
-        
-    def forward(self, cnn_feat, vit_feat):
-        # Ensure sizes match (ViT might have slight rounding diffs if not exact)
-        if cnn_feat.shape[2:] != vit_feat.shape[2:]:
-            vit_feat = F.interpolate(vit_feat, size=cnn_feat.shape[2:], mode='bilinear', align_corners=True)
-            
-        x = torch.cat([cnn_feat, vit_feat], dim=1)
-        x = self.conv(x)
-        x = self.att(x)
+        x = self.reduce(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.smooth(x)
+        x = self.bn2(x)
+        x = self.relu(x)
         return x
 
 class DecoderBlock(nn.Module):
     def __init__(self, in_channels, skip_channels, out_channels):
         super(DecoderBlock, self).__init__()
-        # Use Transposed Convolution for upsampling
-        self.up = nn.ConvTranspose2d(in_channels, in_channels, kernel_size=2, stride=2)
+        # Upsample previous feature
+        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
         
+        # Smooth the skip connection before fusion
+        self.skip_smooth = SmoothBlock(skip_channels, 48) # Heuristic: reduce skip influence/dim
+        
+        # Main Block
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels + skip_channels, out_channels, 3, padding=1, bias=False),
+            nn.Conv2d(in_channels + 48, out_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
@@ -177,65 +365,100 @@ class DecoderBlock(nn.Module):
 
     def forward(self, x, skip):
         x = self.up(x)
+        
         if x.shape[2:] != skip.shape[2:]:
              x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=True)
+        
+        skip = self.skip_smooth(skip)
         x = torch.cat([x, skip], dim=1)
         x = self.conv(x)
         x = self.att(x)
         return x
 
+# ------------------------------------------------------------------------------
+# 5. Main Model
+# ------------------------------------------------------------------------------
 
 class Model(nn.Module):
     def __init__(self, in_channels=2, num_classes=1):
         super(Model, self).__init__()
         
         # Encoders
-        self.cnn_encoder = CNNEncoder(in_channels)
-        self.vit_encoder = ViTEncoder(in_channels)
+        self.cnn = CNNEncoder(in_channels) # ResNet50
+        self.vit = DeiTTiny(in_channels)   # DeiT-Tiny
         
-        # Channel configs
-        # ResNet34: 64, 128, 256, 512
-        # Swin-T:   96, 192, 384, 768
+        # Dimensions
+        # CNN: C1(256), C2(512), C3(1024), C4(2048)
+        # ViT: 192
         
-        # Fusion Blocks
-        self.fuse1 = FusionBlock(64, 96, 64)    # 1/4
-        self.fuse2 = FusionBlock(128, 192, 128) # 1/8
-        self.fuse3 = FusionBlock(256, 384, 256) # 1/16
-        self.fuse4 = FusionBlock(512, 768, 512) # 1/32
+        # Fusion at Bottleneck
+        # Fusing C4 (2048) and ViT (192)
+        # ViT typically outputs 1/16 scale, C4 is 1/32. 
+        # We'll downsample ViT or upsample C4. Let's UpSample C4 to 1/16 or DownSample ViT?
+        # Standard Deeplab: Output Stride 16. 
+        # C4 is 1/32. Let's align to C4 size (1/32) for ASPP? Or 1/16?
+        # Let's align everything to 1/16 (C3 size) which is common for segmentation bottlenecks.
+        
+        # Adapter for C4 to 1/16 if needed, or just use 1/32.
+        # Let's stick to C4 (1/32) and downsample ViT to 1/32.
+        
+        self.vit_down = nn.Conv2d(192, 192, 3, stride=2, padding=1) # 1/16 -> 1/32
+        
+        self.bottleneck_fusion = nn.Sequential(
+            nn.Conv2d(2048 + 192, 512, 1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True)
+        )
+        
+        # ASPP with Global Pooling
+        self.aspp = ASPP(512, atrous_rates=[6, 12, 18], out_channels=256)
         
         # Decoder
-        # Input to decoder is fused4 (512)
-        self.dec4 = DecoderBlock(512, 256, 256) # 512 + 256(skip) -> 256
-        self.dec3 = DecoderBlock(256, 128, 128) # 256 + 128(skip) -> 128
-        self.dec2 = DecoderBlock(128, 64, 64)   # 128 + 64(skip)  -> 64
+        # ASPP Out: 256ch at 1/32 (or roughly thereabouts)
         
-        # Final layers
-        self.final_up = nn.Upsample(scale_factor=4, mode='bilinear', align_corners=True) # 1/4 -> 1
+        # Dec4: Input(256) + Skip(C3=1024) -> 256
+        self.dec4 = DecoderBlock(256, 1024, 256)
+        
+        # Dec3: Input(256) + Skip(C2=512) -> 128
+        self.dec3 = DecoderBlock(256, 512, 128)
+        
+        # Dec2: Input(128) + Skip(C1=256) -> 64
+        self.dec2 = DecoderBlock(128, 256, 64)
+        
+        # Final Upsample x4 to get to original resolution
         self.final_conv = nn.Sequential(
             nn.Conv2d(64, 32, 3, padding=1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             nn.Conv2d(32, num_classes, 1)
         )
-
+        
     def forward(self, x):
         # Encoders
-        c1, c2, c3, c4 = self.cnn_encoder(x)
-        v1, v2, v3, v4 = self.vit_encoder(x)
+        c1, c2, c3, c4 = self.cnn(x)
+        v = self.vit(x) # 1/16
         
-        # Fusion
-        f1 = self.fuse1(c1, v1) # 1/4, 64
-        f2 = self.fuse2(c2, v2) # 1/8, 128
-        f3 = self.fuse3(c3, v3) # 1/16, 256
-        f4 = self.fuse4(c4, v4) # 1/32, 512
+        # Fusion at Bottleneck
+        # Align ViT to C4 (1/32)
+        v_down = self.vit_down(v)
+        if c4.shape[2:] != v_down.shape[2:]:
+            v_down = F.interpolate(v_down, size=c4.shape[2:], mode='bilinear', align_corners=False)
+            
+        f = torch.cat([c4, v_down], dim=1)
+        f = self.bottleneck_fusion(f)
+        
+        # ASPP
+        f = self.aspp(f) # 1/32, 256ch
         
         # Decoder
-        d4 = self.dec4(f4, f3) # -> 1/16, 256
-        d3 = self.dec3(d4, f2) # -> 1/8, 128
-        d2 = self.dec2(d3, f1) # -> 1/4, 64
+        # Skip C3 (1/16), C2 (1/8), C1 (1/4)
+        
+        d4 = self.dec4(f, c3) # -> 1/16
+        d3 = self.dec3(d4, c2) # -> 1/8
+        d2 = self.dec2(d3, c1) # -> 1/4
         
         # Final Output
-        out = self.final_up(d2)
+        out = F.interpolate(d2, scale_factor=4, mode='bilinear', align_corners=True)
         out = self.final_conv(out)
         
         return out
@@ -243,11 +466,15 @@ class Model(nn.Module):
 if __name__ == "__main__":
     # Test
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = Model(in_channels=2, num_classes=1).to(device)
-    dummy_input = torch.randn(2, 2, 256, 256).to(device)
-    output = model(dummy_input)
-    print(f"Input: {dummy_input.shape}")
-    print(f"Output: {output.shape}")
-    
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"Total Parameters: {total_params / 1e6:.2f} M")
+    # Tiny test
+    try:
+        model = Model(in_channels=2, num_classes=1).to(device)
+        dummy_input = torch.randn(2, 2, 256, 256).to(device)
+        output = model(dummy_input)
+        print(f"Input: {dummy_input.shape}")
+        print(f"Output: {output.shape}")
+        
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"Total Parameters: {total_params / 1e6:.2f} M")
+    except Exception as e:
+        print(e)
