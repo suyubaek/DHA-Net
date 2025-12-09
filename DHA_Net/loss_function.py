@@ -239,3 +239,58 @@ class DiceFocalLoss(nn.Module):
         
         # Loss = α * L_dice + (1 - α) * L_focal
         return self.alpha * dice + (1 - self.alpha) * focal
+
+
+class TverskyLoss(nn.Module):
+    def __init__(self, alpha=0.3, beta=0.7, smooth=1e-6):
+        super(TverskyLoss, self).__init__()
+        self.alpha = alpha  # 惩罚 FP (误报)
+        self.beta = beta    # 惩罚 FN (漏报) -> 调大这个值提升 Recall
+        self.smooth = smooth
+
+    def forward(self, inputs, targets):
+        # inputs: Logits (未经过 Sigmoid)
+        # targets: 0 or 1
+        
+        inputs = torch.sigmoid(inputs)
+        
+        # Flatten: (N, C, H, W) -> (N*C*H*W)
+        inputs = inputs.view(-1)
+        targets = targets.view(-1)
+        
+        # True Positives, False Positives, False Negatives
+        TP = (inputs * targets).sum()
+        FP = ((1 - targets) * inputs).sum()
+        FN = (targets * (1 - inputs)).sum()
+        
+        Tversky = (TP + self.smooth) / (TP + self.alpha * FP + self.beta * FN + self.smooth)
+        
+        return 1 - Tversky
+
+class MixedLoss(nn.Module):
+    """
+    结合 BCE 和 Tversky Loss
+    """
+    def __init__(self, alpha=0.3, beta=0.7, weight_bce=0.5, weight_tversky=0.5):
+        super(MixedLoss, self).__init__()
+        self.bce = nn.BCEWithLogitsLoss()
+        self.tversky = TverskyLoss(alpha=alpha, beta=beta)
+        self.weight_bce = weight_bce
+        self.weight_tversky = weight_tversky
+
+    def forward(self, inputs, targets):
+        # 1. 确保 target 是 float 类型 (BCE 需要 float target)
+        targets = targets.float()
+        
+        # 2. 维度对齐: 如果 inputs 是 (B, 1, H, W) 而 targets 是 (B, H, W)，则扩充 targets
+        if inputs.shape != targets.shape:
+            if inputs.dim() == 4 and targets.dim() == 3:
+                targets = targets.unsqueeze(1)
+            else:
+                # 如果维度完全对不上，抛出异常
+                raise ValueError(f"Shape mismatch: inputs {inputs.shape}, targets {targets.shape}")
+
+        loss_bce = self.bce(inputs, targets)
+        loss_tversky = self.tversky(inputs, targets)
+        
+        return self.weight_bce * loss_bce + self.weight_tversky * loss_tversky

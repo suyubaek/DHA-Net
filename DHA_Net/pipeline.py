@@ -14,7 +14,7 @@ from tqdm import tqdm
 import wandb
 
 from model import Model
-from loss_function import DiceBCELoss
+from loss_function import MixedLoss
 from dataprocess import get_loaders, S1WaterDataset
 from config import config
 from metrics import calculate_metrics
@@ -285,6 +285,7 @@ def main():
             num_workers=config["num_workers"],
             neg_sample_ratio=0.3,
             seed=config["seed"],
+            preload=True
         )
         vis_dataset = S1WaterDataset(
             data_dir=config["data_root"],
@@ -377,7 +378,7 @@ def main():
         best_iou, report_iou = 0.0, 0.0
         best_epoch = -1
         best_model_path = os.path.join(checkpoint_dir, "best_model.pth")
-        loss_fc = DiceBCELoss(dice_weight=0.5, bce_weight=0.5).to(device)
+        loss_fc = MixedLoss(alpha=0.35, beta=0.65, weight_bce=0.4, weight_tversky=0.6).to(device)
 
         for epoch in range(config["num_epochs"]):
             

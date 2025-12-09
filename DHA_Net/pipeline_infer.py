@@ -12,7 +12,7 @@ from model import Model
 # Configuration
 # --------------------------------------------------------------------------------
 # 1. Paths
-MODEL_WEIGHTS_PATH = "checkpoints/DHA_Net_1125/best_model.pth" 
+MODEL_WEIGHTS_PATH = "checkpoints/DHA_Net_1205/best_model.pth" 
 INFERENCE_FILE_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/2412_rec_vv_vh.tif"
 GT_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/watermask2412.tif"
 ROI_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/roi_mask.tif"

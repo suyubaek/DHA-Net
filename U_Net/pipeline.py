@@ -285,6 +285,7 @@ def main():
             num_workers=config["num_workers"],
             neg_sample_ratio=0.3,
             seed=config["seed"],
+            preload=True
         )
         vis_dataset = S1WaterDataset(
             data_dir=config["data_root"],
