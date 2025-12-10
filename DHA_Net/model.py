@@ -157,6 +157,7 @@ class DeiTTiny(nn.Module):
         super(DeiTTiny, self).__init__()
         self.patch_size = patch_size
         self.embed_dim = embed_dim
+        self.depth = depth
         self.num_patches = (img_size // patch_size) ** 2
         
         # Patch Embedding
@@ -203,18 +204,16 @@ class DeiTTiny(nn.Module):
             new_dict = {}
             for k, v in state_dict.items():
                 # Map keys from official DeiT to nn.TransformerEncoder structure
-                # Official: blocks.0.attn.qkv.weight -> Our: blocks.layers.0.self_attn.in_proj_weight
-                # Official: blocks.0.attn.proj.weight -> Our: blocks.layers.0.self_attn.out_proj.weight
-                # Official: blocks.0.mlp.fc1.weight -> Our: blocks.layers.0.linear1.weight
-                # Official: blocks.0.mlp.fc2.weight -> Our: blocks.layers.0.linear2.weight
-                # Official: blocks.0.norm1.weight -> Our: blocks.layers.0.norm1.weight
-                # Official: blocks.0.norm2.weight -> Our: blocks.layers.0.norm2.weight
-                
                 if "blocks" in k:
                     parts = k.split(".")
                     if len(parts) < 3:
                         continue
                     layer_idx = parts[1]
+                    
+                    # Filter out layers that exceed our current depth
+                    if int(layer_idx) >= self.depth:
+                        continue
+                        
                     module = parts[2] 
                     
                     prefix = f"blocks.layers.{layer_idx}"
@@ -385,22 +384,7 @@ class Model(nn.Module):
         
         # Encoders
         self.cnn = CNNEncoder(in_channels) # ResNet50
-        self.vit = DeiTTiny(in_channels)   # DeiT-Tiny
-        
-        # Dimensions
-        # CNN: C1(256), C2(512), C3(1024), C4(2048)
-        # ViT: 192
-        
-        # Fusion at Bottleneck
-        # Fusing C4 (2048) and ViT (192)
-        # ViT typically outputs 1/16 scale, C4 is 1/32. 
-        # We'll downsample ViT or upsample C4. Let's UpSample C4 to 1/16 or DownSample ViT?
-        # Standard Deeplab: Output Stride 16. 
-        # C4 is 1/32. Let's align to C4 size (1/32) for ASPP? Or 1/16?
-        # Let's align everything to 1/16 (C3 size) which is common for segmentation bottlenecks.
-        
-        # Adapter for C4 to 1/16 if needed, or just use 1/32.
-        # Let's stick to C4 (1/32) and downsample ViT to 1/32.
+        self.vit = DeiTTiny(in_channels, depth=4)   # DeiT-Tiny (Depth=4)
         
         self.vit_down = nn.Conv2d(192, 192, 3, stride=2, padding=1) # 1/16 -> 1/32
         
