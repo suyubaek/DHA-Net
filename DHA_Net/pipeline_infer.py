@@ -7,16 +7,17 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, cohen_kappa_score
 from config import config
 from model import Model
+import matplotlib.pyplot as plt
 
 # --------------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------------
 # 1. Paths
-MODEL_WEIGHTS_PATH = "checkpoints/DHA_Net_1205/best_model.pth" 
+MODEL_WEIGHTS_PATH = "checkpoints/DHA_Net_1210/best_model.pth" 
 INFERENCE_FILE_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/2412_rec_vv_vh.tif"
 GT_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/watermask2412.tif"
 ROI_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/roi_mask.tif"
-RESULT_SAVE_PATH = f"./results/lancang_river_{config['model_name']}.tif"
+RESULT_SAVE_PATH = f"./lancang_infer/lancang_river_{config['model_name']}.tif"
 
 # 2. Normalization (Must match training)
 NORM_MEAN = [-1148.2476, -1944.6511]
@@ -159,11 +160,104 @@ def predict_sliding_window(model, image_path, patch_size, stride, num_classes, m
     # Return numpy array (H, W)
     return prob_map.squeeze(0).numpy(), profile
 
-def apply_roi_mask_and_save(prob_map, roi_path, save_path, profile):
+def analyze_threshold_distribution(prob_map, gt_path, roi_path, save_plot_path="./lancang_infer/prob_dist.png"):
+    """
+    分析 ROI 区域内的概率分布，并寻找最佳阈值
+    """
+    print(f"\n{'='*20} Step 1.5: Threshold Analysis {'='*20}")
+    
+    # 读取 GT 和 ROI
+    with rasterio.open(gt_path) as src:
+        gt = src.read(1)
+    with rasterio.open(roi_path) as src:
+        roi = src.read(1)
+        
+    # 确保形状一致
+    if gt.shape != prob_map.shape:
+        print("Shape mismatch during analysis, resizing GT/ROI...")
+        return 0.5 # Fallback
+
+    # 展平
+    prob_flat = prob_map.flatten()
+    gt_flat = gt.flatten()
+    roi_flat = roi.flatten()
+    
+    # 只取 ROI 区域内的像素
+    valid_mask = roi_flat > 0
+    valid_probs = prob_flat[valid_mask]
+    valid_gt = gt_flat[valid_mask]
+    valid_gt = (valid_gt > 0).astype(np.uint8) # 确保是 0/1
+    
+    # 1. 计算密度分布 (不直接画直方图，而是计算数据点)
+    pos_probs = valid_probs[valid_gt == 1] # 真实为水的预测概率
+    neg_probs = valid_probs[valid_gt == 0] # 真实为背景的预测概率
+    
+    # 设置 200 个区间，让曲线更平滑
+    bins = np.linspace(0, 1, 201)
+    bin_centers = (bins[:-1] + bins[1:]) / 2
+    
+    # 计算密度 (density=True)
+    pos_hist, _ = np.histogram(pos_probs, bins=bins, density=True)
+    neg_hist, _ = np.histogram(neg_probs, bins=bins, density=True)
+    
+    # 绘制折线图
+    plt.figure(figsize=(10, 6))
+    
+    # 背景分布 (灰色)
+    plt.plot(bin_centers, neg_hist, label='Background (GT=0)', color='gray', alpha=0.8, linewidth=1.5)
+    # 填充下方区域让图更好看一点 (可选)
+    plt.fill_between(bin_centers, neg_hist, color='gray', alpha=0.1)
+    
+    # 水体分布 (蓝色)
+    plt.plot(bin_centers, pos_hist, label='Water (GT=1)', color='blue', alpha=0.8, linewidth=1.5)
+    plt.fill_between(bin_centers, pos_hist, color='blue', alpha=0.1)
+    
+    plt.yscale('log') # 保持对数坐标
+    plt.title("Prediction Probability Density (Log Scale)")
+    plt.xlabel("Predicted Probability")
+    plt.ylabel("Density (Log)")
+    plt.legend()
+    plt.grid(True, alpha=0.3, which="both", ls="--") # 增加网格线密度
+    
+    plt.savefig(save_plot_path)
+    plt.close()
+    print(f"Distribution plot saved to {save_plot_path}")
+    
+    # 2. 搜索最佳阈值 (基于 F1-Score)
+    best_threshold = 0.5
+    best_f1 = 0.0
+    
+    # 采用非均匀搜索策略：在低概率区间更密集
+    thresholds = np.concatenate([
+        np.arange(0.001, 0.05, 0.001), # 0.001 ~ 0.05 (步长 0.001)
+        np.arange(0.05, 0.20, 0.01),   # 0.05 ~ 0.20 (步长 0.01)
+        np.arange(0.20, 0.96, 0.05)    # 0.20 ~ 0.95 (步长 0.05)
+    ])
+    
+    print(f"Searching for optimal threshold among {len(thresholds)} candidates (focusing on 0-0.05)...")
+    
+    for th in thresholds:
+        pred_bin = (valid_probs > th).astype(np.uint8)
+        f1 = f1_score(valid_gt, pred_bin, zero_division=0)
+        
+        # 打印一些关键点的 F1，方便调试
+        if th in [0.005, 0.01, 0.02, 0.05, 0.1, 0.5]:
+             print(f"  Th={th:.3f} -> F1={f1:.4f}")
+
+        if f1 > best_f1:
+            best_f1 = f1
+            best_threshold = th
+            
+    print(f"Best Threshold: {best_threshold:.4f} (Max F1: {best_f1:.4f})")
+    return best_threshold
+
+# 修改 apply_roi_mask_and_save 以接受 threshold 参数
+def apply_roi_mask_and_save(prob_map, roi_path, save_path, profile, threshold=0.5):
     """
     Step 2: ROI Masking & Saving
     """
     print(f"\n{'='*20} Step 2: ROI Masking & Saving {'='*20}")
+    print(f"Using Threshold: {threshold}")
     
     # Load ROI
     with rasterio.open(roi_path) as src:
@@ -177,7 +271,7 @@ def apply_roi_mask_and_save(prob_map, roi_path, save_path, profile):
 
     # Apply Mask: ROI==0 -> Background (0)
     # Threshold prediction first
-    pred_binary = (prob_map > 0.3).astype(np.uint8)
+    pred_binary = (prob_map > threshold).astype(np.uint8)
     
     # Masking
     final_result = pred_binary * (roi_mask > 0).astype(np.uint8)
@@ -287,9 +381,18 @@ def main():
             device=device
         )
         
-        # Step 2: Masking & Saving
+        # [新增] 动态确定最佳阈值
+        optimal_threshold = 0.005 # 默认值
+        # if os.path.exists(GT_PATH) and os.path.exists(ROI_PATH):
+        #     try:
+        #         optimal_threshold = analyze_threshold_distribution(prob_map, GT_PATH, ROI_PATH)
+        #     except Exception as e:
+        #         print(f"Threshold analysis failed: {e}. Using default 0.1")
+        #         optimal_threshold = 0.1
+        
+        # Step 2: Masking & Saving (传入计算出的阈值)
         if os.path.exists(ROI_PATH):
-            final_pred = apply_roi_mask_and_save(prob_map, ROI_PATH, RESULT_SAVE_PATH, profile)
+            final_pred = apply_roi_mask_and_save(prob_map, ROI_PATH, RESULT_SAVE_PATH, profile, threshold=optimal_threshold)
             
             # Step 3: Evaluation
             if os.path.exists(GT_PATH):

@@ -4,7 +4,7 @@ config = {
 
     'data_root': '/mnt/data1/rove/dataset/S1_Water',
     'batch_size': 96,
-    'num_workers': 16,
+    'num_workers': 12,
 
     'model_name': 'DHA_Net',
     'in_channels': 2,
@@ -13,7 +13,7 @@ config = {
     'image_size': 256,
     'patch_size': 16,
 
-    'learning_rate': 3e-4,
+    'learning_rate': 5e-4,
     'min_lr': 1e-6,
     'weight_decay': 1e-3,
     'num_epochs': 300,
