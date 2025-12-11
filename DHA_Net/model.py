@@ -51,6 +51,48 @@ class DualAttentionBlock(nn.Module):
         return x
 
 
+# ------------------------------------------------------------------------------
+# 2. Strip Pooling & ASPP Module
+# ------------------------------------------------------------------------------
+
+class StripPooling(nn.Module):
+    """
+    Strip Pooling Module (SPM) 
+    Captures long-range dependencies for narrow structures (like rivers/roads).
+    """
+    def __init__(self, in_channels, out_channels=None):
+        super(StripPooling, self).__init__()
+        out_channels = in_channels if out_channels is None else out_channels
+        
+        self.pool1 = nn.AdaptiveAvgPool2d((1, None)) # 1xW (Horizontal)
+        self.pool2 = nn.AdaptiveAvgPool2d((None, 1)) # Hx1 (Vertical)
+        
+        self.conv1 = nn.Conv2d(in_channels, in_channels, 3, padding=1, bias=False)
+        self.conv2 = nn.Conv2d(in_channels, in_channels, 3, padding=1, bias=False)
+        
+        self.conv_merge = nn.Conv2d(in_channels, out_channels, 1, bias=False)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        h, w = x.shape[2:]
+        
+        # Horizontal
+        x1 = self.pool1(x)
+        x1 = F.interpolate(x1, (h, w), mode="bilinear", align_corners=True)
+        x1 = self.conv1(x1)
+        
+        # Vertical
+        x2 = self.pool2(x)
+        x2 = F.interpolate(x2, (h, w), mode="bilinear", align_corners=True)
+        x2 = self.conv2(x2)
+        
+        # Fusion
+        out = self.conv_merge(x1 + x2)
+        out = self.bn(out)
+        out = self.relu(out)
+        return out     
+
 class ASPPConv(nn.Sequential):
     def __init__(self, in_channels, out_channels, dilation):
         modules = [
@@ -59,19 +101,6 @@ class ASPPConv(nn.Sequential):
             nn.ReLU(inplace=True)
         ]
         super(ASPPConv, self).__init__(*modules)
-
-class ASPPPooling(nn.Sequential):
-    def __init__(self, in_channels, out_channels):
-        super(ASPPPooling, self).__init__(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(in_channels, out_channels, 1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True))
-
-    def forward(self, x):
-        size = x.shape[-2:]
-        x = super(ASPPPooling, self).forward(x)
-        return F.interpolate(x, size=size, mode='bilinear', align_corners=False)
 
 class ASPP(nn.Module):
     def __init__(self, in_channels, atrous_rates, out_channels=256):
@@ -87,8 +116,9 @@ class ASPP(nn.Module):
         for rate in atrous_rates:
             modules.append(ASPPConv(in_channels, out_channels, rate))
 
-        # Global Average Pooling
-        modules.append(ASPPPooling(in_channels, out_channels))
+        # Strip Pooling (Replacing Global Pooling)
+        # Uses SPM to capture long-range context
+        modules.append(StripPooling(in_channels, out_channels))
 
         self.convs = nn.ModuleList(modules)
         
@@ -106,6 +136,85 @@ class ASPP(nn.Module):
             res.append(conv(x))
         res = torch.cat(res, dim=1)
         return self.project(res)
+
+
+# ------------------------------------------------------------------------------
+# 3. Encoders
+# ------------------------------------------------------------------------------
+# ... (Encoders remain unchanged, skipping to Decoder section via context match) 
+
+# ... (Previous Encoders code) ...
+
+# ------------------------------------------------------------------------------
+# 4. Decoders & Smoothing
+# ------------------------------------------------------------------------------
+
+class StripSmoothBlock(nn.Module):
+    """
+    Smoothes skip connections and enhances long-range context with Strip Pooling.
+    Structure: Input -> Reduce -> (3x3 Conv + StripPooling) -> Output
+    """
+    def __init__(self, in_channels, out_channels):
+        super(StripSmoothBlock, self).__init__()
+        self.reduce = nn.Conv2d(in_channels, out_channels, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        
+        # Local Smoothing
+        self.local_smooth = nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False)
+        
+        # Long-range Context
+        self.strip_pool = StripPooling(out_channels, out_channels)
+        
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        
+    def forward(self, x):
+        # Reduce dimension first
+        x = self.reduce(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        
+        # Fusion of Local and Global Context
+        local_feat = self.local_smooth(x)
+        global_feat = self.strip_pool(x)
+        
+        # Add them up (Residual-like)
+        out = local_feat + global_feat 
+        out = self.bn2(out)
+        out = self.relu(out)
+        return out
+
+class DecoderBlock(nn.Module):
+    def __init__(self, in_channels, skip_channels, out_channels):
+        super(DecoderBlock, self).__init__()
+        # Upsample previous feature
+        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        
+        # Smooth and Enhance the skip connection
+        self.skip_smooth = StripSmoothBlock(skip_channels, 48) # Using StripSmoothBlock
+        
+        # Main Block
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels + 48, out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+        self.att = DualAttentionBlock(out_channels)
+
+    def forward(self, x, skip):
+        x = self.up(x)
+        
+        if x.shape[2:] != skip.shape[2:]:
+             x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=True)
+        
+        skip = self.skip_smooth(skip)
+        x = torch.cat([x, skip], dim=1)
+        x = self.conv(x)
+        x = self.att(x)
+        return x
 
 
 class CNNEncoder(nn.Module):
