@@ -571,3 +571,13 @@ if __name__ == "__main__":
         print(f"Total Parameters: {total_params / 1e6:.2f} M")
     except Exception as e:
         print(e)
+    
+    # [新增] 计算 FLOPs
+    from thop import profile
+    
+    # 注意：输入尺寸会影响 FLOPs，通常用 256x256 或 512x512 测试
+    input_tensor = torch.randn(1, 2, 256, 256).to(device) 
+    flops, params = profile(model, inputs=(input_tensor, ), verbose=False)
+    
+    print(f"GFLOPs: {flops / 1e9:.2f} G")
+    print(f"Params: {params / 1e6:.2f} M")

@@ -1,5 +1,5 @@
 config = {
-    'seed': 3047,
+    'seed': 42,
     'device': 'cuda',
 
     'data_root': '/mnt/data1/rove/dataset/S1_Water',
