@@ -1,12 +1,12 @@
 config = {
-    'seed': 3047,
+    'seed': 42,
     'device': 'cuda',
 
     'data_root': '/mnt/data1/rove/dataset/S1_Water',
     'batch_size': 96,
     'num_workers': 12,
 
-    'model_name': 'DHA_Net',
+    'model_name': 'DHA_Net_NoCBAM',
     'in_channels': 2,
     'num_classes': 1,
     'use_bilinear': True,

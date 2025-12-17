@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 # Configuration
 # --------------------------------------------------------------------------------
 # 1. Paths
-MODEL_WEIGHTS_PATH = "checkpoints/DHA_Net_1205/best_model.pth" 
+MODEL_WEIGHTS_PATH = "checkpoints/DHA_Net_1210/best_model.pth" 
 INFERENCE_FILE_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/2412_rec_vv_vh.tif"
 GT_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/watermask2412.tif"
 ROI_PATH = "/mnt/data1/rove/dataset/S1_Water/infer/roi_mask.tif"
@@ -382,7 +382,7 @@ def main():
         )
         
         # [新增] 动态确定最佳阈值
-        optimal_threshold = 0.5 # 默认值
+        optimal_threshold = 0.005 # 默认值
         # if os.path.exists(GT_PATH) and os.path.exists(ROI_PATH):
         #     try:
         #         optimal_threshold = analyze_threshold_distribution(prob_map, GT_PATH, ROI_PATH)
