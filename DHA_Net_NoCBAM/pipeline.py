@@ -450,6 +450,7 @@ def main():
                     plt.close(figure)
 
             if val_iou > best_iou:
+                best_epoch = epoch + 1
                 if val_iou > 0.7 and val_iou - report_iou > 0.01:
                     report_iou = val_iou
                     elapsed = (datetime.now() - start_time).total_seconds()
@@ -468,7 +469,6 @@ def main():
                         ),
                     )
                 best_iou = val_iou
-                best_epoch = epoch + 1
                 save_checkpoint(model, optimizer, epoch, best_iou, best_model_path)
                 logging.info(
                     f"New best model saved at epoch {best_epoch} with IoU: {best_iou:.4f}"
