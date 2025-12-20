@@ -12,7 +12,11 @@ class ChannelAttention(nn.Module):
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.max_pool = nn.AdaptiveMaxPool2d(1)
 
-        self.fc = nn.Sequential(nn.Conv2d(in_channels, in_channels // reduction_ratio, 1, bias=False), nn.ReLU(inplace=True), nn.Conv2d(in_channels // reduction_ratio, in_channels, 1, bias=False))
+        self.fc = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // reduction_ratio, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // reduction_ratio, in_channels, 1, bias=False),
+        )
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
@@ -99,7 +103,18 @@ class StripPooling(nn.Module):
 
 class ASPPConv(nn.Sequential):
     def __init__(self, in_channels, out_channels, dilation):
-        modules = [nn.Conv2d(in_channels, out_channels, 3, padding=dilation, dilation=dilation, bias=False), nn.BatchNorm2d(out_channels), nn.ReLU(inplace=True)]
+        modules = [
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                3,
+                padding=dilation,
+                dilation=dilation,
+                bias=False,
+            ),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        ]
         super(ASPPConv, self).__init__(*modules)
 
 
@@ -108,7 +123,13 @@ class ASPP(nn.Module):
         super(ASPP, self).__init__()
         modules = []
         # 1x1 conv
-        modules.append(nn.Sequential(nn.Conv2d(in_channels, out_channels, 1, bias=False), nn.BatchNorm2d(out_channels), nn.ReLU(inplace=True)))
+        modules.append(
+            nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, 1, bias=False),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(inplace=True),
+            )
+        )
 
         # Atrous convolutions
         for rate in atrous_rates:
@@ -121,7 +142,12 @@ class ASPP(nn.Module):
         self.convs = nn.ModuleList(modules)
 
         # Project after concatenation
-        self.project = nn.Sequential(nn.Conv2d(len(modules) * out_channels, out_channels, 1, bias=False), nn.BatchNorm2d(out_channels), nn.ReLU(inplace=True), nn.Dropout(0.5))
+        self.project = nn.Sequential(
+            nn.Conv2d(len(modules) * out_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+        )
 
     def forward(self, x):
         res = []
@@ -147,7 +173,9 @@ class CNNEncoder(nn.Module):
         # Modify first layer for 2-channel input
         if in_channels != 3:
             old_conv = resnet.conv1
-            new_conv = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
+            new_conv = nn.Conv2d(
+                in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False
+            )
 
             # Initialize with first 'in_channels' of pretrained weights
             with torch.no_grad():
@@ -155,7 +183,9 @@ class CNNEncoder(nn.Module):
 
             self.stem = nn.Sequential(new_conv, resnet.bn1, resnet.relu, resnet.maxpool)
         else:
-            self.stem = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool)
+            self.stem = nn.Sequential(
+                resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool
+            )
 
         self.layer1 = resnet.layer1  # 256
         self.layer2 = resnet.layer2  # 512
@@ -174,7 +204,17 @@ class CNNEncoder(nn.Module):
 class DeiTTiny(nn.Module):
     """Manual DeiT-Tiny Implementation with Pretrained Weights"""
 
-    def __init__(self, in_channels=2, img_size=256, patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4.0, pretrained=True):
+    def __init__(
+        self,
+        in_channels=2,
+        img_size=256,
+        patch_size=16,
+        embed_dim=192,
+        depth=12,
+        num_heads=3,
+        mlp_ratio=4.0,
+        pretrained=True,
+    ):
         super(DeiTTiny, self).__init__()
         self.patch_size = patch_size
         self.embed_dim = embed_dim
@@ -182,7 +222,9 @@ class DeiTTiny(nn.Module):
         self.num_patches = (img_size // patch_size) ** 2
 
         # Patch Embedding
-        self.patch_embed = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.patch_embed = nn.Conv2d(
+            in_channels, embed_dim, kernel_size=patch_size, stride=patch_size
+        )
 
         # Class token and distill token
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
@@ -191,7 +233,14 @@ class DeiTTiny(nn.Module):
         self.pos_drop = nn.Dropout(p=0.0)
 
         # Encoder
-        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=int(embed_dim * mlp_ratio), activation="gelu", batch_first=True, norm_first=True)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=int(embed_dim * mlp_ratio),
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
         self.blocks = nn.TransformerEncoder(encoder_layer, num_layers=depth)
         self.norm = nn.LayerNorm(embed_dim)
 
@@ -216,7 +265,9 @@ class DeiTTiny(nn.Module):
     def _load_pretrained_weights(self):
         url = "https://dl.fbaipublicfiles.com/deit/deit_tiny_distilled_patch16_224-b40b3cf7.pth"
         try:
-            state_dict = torch.hub.load_state_dict_from_url(url, map_location="cpu", check_hash=True)
+            state_dict = torch.hub.load_state_dict_from_url(
+                url, map_location="cpu", check_hash=True
+            )
             if "model" in state_dict:
                 state_dict = state_dict["model"]
 
@@ -265,8 +316,15 @@ class DeiTTiny(nn.Module):
                             new_dict[new_k] = v
                 elif "patch_embed.proj" in k:
                     # Resize patch_embed if channels mismatch (3 vs 2)
-                    if "weight" in k and v.ndim >= 2 and v.shape[1] == 3 and self.patch_embed.weight.shape[1] != 3:
-                        print(f"Adapting patch_embed from 3 to {self.patch_embed.weight.shape[1]} channels")
+                    if (
+                        "weight" in k
+                        and v.ndim >= 2
+                        and v.shape[1] == 3
+                        and self.patch_embed.weight.shape[1] != 3
+                    ):
+                        print(
+                            f"Adapting patch_embed from 3 to {self.patch_embed.weight.shape[1]} channels"
+                        )
                         v_new = v[:, : self.patch_embed.weight.shape[1], :, :]
                         new_dict["patch_embed.weight"] = v_new
                     else:
@@ -283,18 +341,27 @@ class DeiTTiny(nn.Module):
                         old_pos = v
                         new_pos = self.pos_embed
                         if old_pos.shape != new_pos.shape:
-                            print(f"Interpolating pos_embed: {old_pos.shape} -> {new_pos.shape}")
+                            print(
+                                f"Interpolating pos_embed: {old_pos.shape} -> {new_pos.shape}"
+                            )
                             # Extract tokens
                             old_pos_tokens = old_pos[:, :n_tokens]
                             old_pos_grid = old_pos[:, n_tokens:]
 
                             # Reshape grid to square
                             gs_old = int(math.sqrt(old_pos_grid.shape[1]))
-                            old_pos_grid = old_pos_grid.transpose(1, 2).reshape(1, self.embed_dim, gs_old, gs_old)
+                            old_pos_grid = old_pos_grid.transpose(1, 2).reshape(
+                                1, self.embed_dim, gs_old, gs_old
+                            )
 
                             # Interpolate
                             gs_new = int(math.sqrt(new_pos.shape[1] - n_tokens))
-                            new_pos_grid = F.interpolate(old_pos_grid, size=(gs_new, gs_new), mode="bilinear", align_corners=False)
+                            new_pos_grid = F.interpolate(
+                                old_pos_grid,
+                                size=(gs_new, gs_new),
+                                mode="bilinear",
+                                align_corners=False,
+                            )
                             new_pos_grid = new_pos_grid.flatten(2).transpose(1, 2)
 
                             new_v = torch.cat([old_pos_tokens, new_pos_grid], dim=1)
@@ -380,7 +447,9 @@ class StripSmoothBlock(nn.Module):
         self.relu = nn.ReLU(inplace=True)
 
         # Local Smoothing
-        self.local_smooth = nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False)
+        self.local_smooth = nn.Conv2d(
+            out_channels, out_channels, 3, padding=1, bias=False
+        )
 
         # Long-range Context
         self.strip_pool = StripPooling(out_channels, out_channels)
@@ -414,14 +483,23 @@ class DecoderBlock(nn.Module):
         self.skip_smooth = StripSmoothBlock(skip_channels, 48)  # Using StripSmoothBlock
 
         # Main Block
-        self.conv = nn.Sequential(nn.Conv2d(in_channels + 48, out_channels, 3, padding=1, bias=False), nn.BatchNorm2d(out_channels), nn.ReLU(inplace=True), nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False), nn.BatchNorm2d(out_channels), nn.ReLU(inplace=True))
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels + 48, out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
         self.att = DualAttentionBlock(out_channels)
 
     def forward(self, x, skip):
         x = self.up(x)
 
         if x.shape[2:] != skip.shape[2:]:
-            x = F.interpolate(x, size=skip.shape[2:], mode="bilinear", align_corners=True)
+            x = F.interpolate(
+                x, size=skip.shape[2:], mode="bilinear", align_corners=True
+            )
 
         skip = self.skip_smooth(skip)
         x = torch.cat([x, skip], dim=1)
@@ -445,7 +523,11 @@ class Model(nn.Module):
 
         self.vit_down = nn.Conv2d(192, 192, 3, stride=2, padding=1)  # 1/16 -> 1/32
 
-        self.bottleneck_fusion = nn.Sequential(nn.Conv2d(2048 + 192, 512, 1, bias=False), nn.BatchNorm2d(512), nn.ReLU(inplace=True))
+        self.bottleneck_fusion = nn.Sequential(
+            nn.Conv2d(2048 + 192, 512, 1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+        )
 
         # ASPP with Global Pooling
         self.aspp = ASPP(512, atrous_rates=[6, 12, 18], out_channels=256)
@@ -463,7 +545,12 @@ class Model(nn.Module):
         self.dec2 = DecoderBlock(128, 256, 64)
 
         # Final Upsample x4 to get to original resolution
-        self.final_conv = nn.Sequential(nn.Conv2d(64, 32, 3, padding=1, bias=False), nn.BatchNorm2d(32), nn.ReLU(inplace=True), nn.Conv2d(32, num_classes, 1))
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(64, 32, 3, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, num_classes, 1),
+        )
 
     def forward(self, x):
         # Encoders
@@ -474,7 +561,9 @@ class Model(nn.Module):
         # Align ViT to C4 (1/32)
         v_down = self.vit_down(v)
         if c4.shape[2:] != v_down.shape[2:]:
-            v_down = F.interpolate(v_down, size=c4.shape[2:], mode="bilinear", align_corners=False)
+            v_down = F.interpolate(
+                v_down, size=c4.shape[2:], mode="bilinear", align_corners=False
+            )
 
         f = torch.cat([c4, v_down], dim=1)
         f = self.bottleneck_fusion(f)
@@ -620,5 +709,7 @@ if __name__ == "__main__":
 
     print("-" * 60)
     print(f"{'Throughput':<20} | {'FPS (img/s)':<15} | {fps:.2f}")
-    print(f"{'(B={batch_size_throughput})':<20} | {'Area (km²/s)':<15} | {throughput_km2_s:.2f}")
+    print(
+        f"{f'(B={batch_size_throughput})':<20} | {'Area (km²/s)':<15} | {throughput_km2_s:.2f}"
+    )
     print("=" * 60)
