@@ -272,7 +272,7 @@ def main():
     # W&B实验看板初始化
     experiment_name = f"{config['model_name']}_{datetime.now().strftime('%m%d')}"
     wandb.init(
-        project="LanCang River",
+        project="lancang river",
         name=experiment_name,
         config=config,
         tags=["DHA"],
@@ -343,7 +343,7 @@ def main():
         )
         
         # 创建检查点目录
-        checkpoint_dir = os.path.join("/home/rove/lancing/checkpoints", experiment_name)
+        checkpoint_dir = os.path.join("/home/suyubaek/lancing/checkpoints", experiment_name)
         os.makedirs(checkpoint_dir, exist_ok=True)
 
         # 本地日志配置

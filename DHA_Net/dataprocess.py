@@ -36,7 +36,12 @@ class S1WaterDataset(Dataset):
 
         if split == 'train':
             cache_filename = f"train_cache_ratio_{neg_sample_ratio}_seed_{seed}.pt"
-            cache_file = self.data_dir / cache_filename
+            # 不要用 self.data_dir，改用你自己的家目录
+            user_home = Path.home() 
+            cache_dir = user_home / ".cache/s1_water" # 建立一个专门放缓存的私有文件夹
+            cache_dir.mkdir(parents=True, exist_ok=True) # 确保文件夹存在
+    
+            cache_file = cache_dir / cache_filename
             
             if cache_file.exists():
                 print(f"--- 正在从缓存加载训练数据: {cache_filename} ---")
