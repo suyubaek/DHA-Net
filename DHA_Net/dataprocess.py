@@ -181,7 +181,7 @@ class S1WaterDataset(Dataset):
 
         return mean, std
 
-    def _infer_cls_label(self, mask: torch.Tensor) -> torch.Tensor:
+    def _infer_cls_label(self, mask: torch.Tensor) -> torch.Tensor: #这里为什么分成三个任务
         has_water = torch.any(mask > 0)
         has_land = torch.any(mask == 0)
         if has_water and has_land:
@@ -220,12 +220,10 @@ class S1WaterDataset(Dataset):
             cls_label = self._infer_cls_label(mask)
             
             # CPU Augmentation: Only Flips (Only for train)
-            if self.split == 'train':
-                if torch.rand(1) > 0.5: image, mask = TF.hflip(image), TF.hflip(mask)
-                if torch.rand(1) > 0.5: image, mask = TF.vflip(image), TF.vflip(mask)
-                
-                # Rotation and Noise moved to GPU
-            
+            #取消数据增强
+            # if self.split == 'train':
+            #     if torch.rand(1) > 0.5: image, mask = TF.hflip(image), TF.hflip(mask)
+            #     if torch.rand(1) > 0.5: image, mask = TF.vflip(image), TF.vflip(mask)
             return image, mask, cls_label
 
         except Exception as e:

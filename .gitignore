@@ -3,7 +3,7 @@
 /lancang_infer
 
 /.venv
-**/message2lark.py
+**/message2lark.py  #忽略与Lark消息推送相关的脚本 涉及个人的api key
 
 **/nohup.out
 

@@ -7,8 +7,8 @@ import warnings
 
 # --- 1. 配置路径 ---
 SOURCE_DIR = "/mnt/data1/datasets/Sentinel_Water"
-OUTPUT_DIR = "/mnt/data1/rove/dataset/S1_Water_512"
-PATCH_SIZE = 512
+OUTPUT_DIR = "/mnt/data1/suyubaek/dataset/S1_Water_256"
+PATCH_SIZE = 256  # 切片大小
 
 def process_scene(scene_dir, output_base_dir, patch_size=256):
     """

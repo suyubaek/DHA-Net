@@ -239,7 +239,123 @@ class DiceFocalLoss(nn.Module):
         
         # Loss = α * L_dice + (1 - α) * L_focal
         return self.alpha * dice + (1 - self.alpha) * focal
+class LovászLoss(nn.Module):
+    """
+    Lovász-Softmax loss.
+    Based on https://github.com/bermanmaxim/LovaszSoftmax
+    """
+    def __init__(self, per_image=False, ignore=None):
+        super(LovászLoss, self).__init__()
+        self.per_image = per_image
+        self.ignore = ignore
 
+    def forward(self, logits, targets):
+        if self.per_image:
+            loss = self.mean(self.lovasz_hinge_flat(*self.flatten_probas(logit.unsqueeze(0), target.unsqueeze(0)))
+                          for logit, target in zip(logits, targets))
+        else:
+            loss = self.lovasz_hinge_flat(*self.flatten_probas(logits, targets))
+        return loss
+
+    def lovasz_hinge_flat(self, logits, labels):
+        """
+        Binary Lovasz hinge loss
+          logits: [P] Variable, logits at each pixel (between -\infty and +\infty)
+          labels: [P] Tensor, binary ground truth labels (0 or 1)
+        """
+        if len(labels) == 0:
+            # only void pixels, the gradients should be 0
+            return logits.sum() * 0.
+        
+        signs = 2. * labels.float() - 1.
+        errors = (1. - logits * signs)
+        errors_sorted, perm = torch.sort(errors, dim=0, descending=True)
+        perm = perm.data
+        gt_sorted = labels[perm]
+        grad = self.lovasz_grad(gt_sorted)
+        loss = torch.dot(F.relu(errors_sorted), grad)
+        return loss
+
+    def flatten_probas(self, logits, labels):
+        """
+        Flattens predictions in the batch
+        """
+        # The original Lovasz-Softmax uses probabilities, but for the hinge loss formulation,
+        # working with logits is more direct and numerically stable.
+        # The hinge loss is max(0, 1 - y*f(x)) where y is {-1, 1} and f(x) is the logit.
+        
+        # Ensure target is float for calculations
+        labels = labels.float()
+        
+        # Align dimensions if necessary
+        if logits.dim() == 4 and labels.dim() == 3:
+            labels = labels.unsqueeze(1)
+        
+        if logits.shape != labels.shape:
+            raise ValueError(f"Shape mismatch: logits {logits.shape}, labels {labels.shape}")
+
+        logits = logits.view(-1)
+        labels = labels.view(-1)
+        if self.ignore is not None:
+            valid = (labels != self.ignore)
+            logits = logits[valid]
+            labels = labels[valid]
+        return logits, labels
+
+    @staticmethod
+    def lovasz_grad(gt_sorted):
+        """
+        Computes gradient of the Lovasz extension w.r.t sorted errors
+        """
+        p = len(gt_sorted)
+        gts = gt_sorted.sum()
+        intersection = gts - gt_sorted.float().cumsum(0)
+        union = gts + (1 - gt_sorted).float().cumsum(0)
+        jaccard = 1. - intersection / union
+        if p > 1: # cover 1-pixel case
+            jaccard[1:p] = jaccard[1:p] - jaccard[0:-1]
+        return jaccard
+    
+    @staticmethod
+    def mean(l, ignore_nan=False, empty=0):
+        """
+        nanmean compatible with generators.
+        """
+        s = 0
+        n = 0
+        for x in l:
+            if not ignore_nan or not torch.isnan(x):
+                s += x
+                n += 1
+        if n == 0:
+            return empty
+        return s / n
+
+class LovaszBCELoss(nn.Module):
+    def __init__(self, lovasz_weight: float = 0.5, bce_weight: float = 0.5, per_image=False, ignore=None):
+        super(LovaszBCELoss, self).__init__()
+        self.lovasz_weight = lovasz_weight
+        self.bce_weight = bce_weight
+        self.lovasz_loss = LovászLoss(per_image=per_image, ignore=ignore)
+        self.bce_loss = nn.BCEWithLogitsLoss()
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        target = target.float()
+
+        if logits.shape != target.shape:
+            if logits.dim() == 4 and target.dim() == 3:
+                target = target.unsqueeze(1)
+            else:
+                raise ValueError(
+                    f"Shape mismatch: logits {logits.shape}, target {target.shape}. "
+                    "Cannot automatically unsqueeze."
+                )
+        
+        lovasz_loss = self.lovasz_loss(logits, target)
+        bce_loss = self.bce_loss(logits, target)
+
+        combined_loss = (self.lovasz_weight * lovasz_loss) + (self.bce_weight * bce_loss)
+        return combined_loss,lovasz_loss,bce_loss
 
 class TverskyLoss(nn.Module):
     def __init__(self, alpha=0.3, beta=0.7, smooth=1e-6):
@@ -271,6 +387,7 @@ class MixedLoss(nn.Module):
     """
     结合 BCE 和 Tversky Loss
     """
+    #怎么平权了，打个点看下量级
     def __init__(self, alpha=0.3, beta=0.7, weight_bce=0.5, weight_tversky=0.5):
         super(MixedLoss, self).__init__()
         self.bce = nn.BCEWithLogitsLoss()
@@ -293,4 +410,6 @@ class MixedLoss(nn.Module):
         loss_bce = self.bce(inputs, targets)
         loss_tversky = self.tversky(inputs, targets)
         
-        return self.weight_bce * loss_bce + self.weight_tversky * loss_tversky
+        total_loss = self.weight_bce * loss_bce + self.weight_tversky * loss_tversky
+        return total_loss, loss_bce, loss_tversky
+

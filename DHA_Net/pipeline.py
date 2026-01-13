@@ -8,6 +8,7 @@ import logging
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
@@ -21,6 +22,7 @@ from metrics import calculate_metrics
 from message2lark import send_message
 from visualization import create_sample_images
 import torchvision.transforms.functional as TF
+
 
 class GPUAugmentor:
     """
@@ -78,14 +80,15 @@ def save_checkpoint(model, optimizer, epoch, iou, path):
     
     torch.save(state, path)
 
-def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
+def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch,
+                    train_dataset=None, grad_cam=None, epoch_state=None):
     model.train()
-    total_loss = seg_loss_total = 0.0
+    total_loss = seg_loss_total = bce_loss_total = tversky_loss_total = 0.0
     iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
     metric_count = 0
     
     # Initialize GPU Augmentor
-    augmentor = GPUAugmentor(rotate_prob=0.5, noise_prob=0.5)
+    # augmentor = GPUAugmentor(rotate_prob=0.5, noise_prob=0.5)#数据增强
     
     pbar = tqdm(train_loader, desc=f"Training Epoch {epoch}")
     for batch_idx, batch in enumerate(pbar):
@@ -95,28 +98,162 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
         class_labels = class_labels.to(device, non_blocking=True)
 
         # Apply GPU Augmentation
-        with torch.no_grad():
-            images, labels = augmentor(images, labels)
+        # with torch.no_grad():
+        #     images, labels = augmentor(images, labels)
 
-        optimizer.zero_grad()
-        
-        seg_logits = model(images)
+        optimizer.zero_grad() #清空历史梯度
+
+        #seg_logits = model(images) #前向传播  分割
+        model_output=model(images)
+
+        # 模型如果返回 tuple（例如 (seg, aux_feat, ...)），先取第一个作为分割输出
+        if isinstance(model_output, (list,tuple)):
+            seg_logits = model_output[0]
+            s1=model_output[1]
+            s2=model_output[2]
+        else:
+            seg_logits = model_output
+            s1=s2=None
+
         if isinstance(seg_logits, list):
             # Deep supervision case
             loss = 0
+            bce_loss_sum = 0
+            tversky_loss_sum = 0
             for logits in seg_logits:
-                loss += loss_fc(logits, labels)
+                l, b, t = loss_fc(logits, labels)
+                loss += l
+                bce_loss_sum += b
+                tversky_loss_sum += t
             loss /= len(seg_logits)
+            #分别记录和观察每个loss的变化情况
+            loss_bce = bce_loss_sum / len(seg_logits)
+            loss_tversky = tversky_loss_sum / len(seg_logits)
             seg_logits = seg_logits[0] # Use the first output for metrics
         else:
-            loss = loss_fc(seg_logits, labels)
+            loss, loss_bce, loss_tversky = loss_fc(seg_logits, labels)
         
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        loss.backward() #计算梯度
+
+        # Grad-CAM & 余弦相似度：只在每 10 个 epoch 的第一个 batch 上做一次
+        if (
+            grad_cam is not None
+            and train_dataset is not None
+            and batch_idx == 0
+            and (epoch % 10 == 0)
+        ):
+            try:
+                stats = (train_dataset.mean, train_dataset.std)
+
+                # 先获取所有 CAM 并进行可视化
+                cams = grad_cam.get_all(upsample_size=images.shape[-2:])
+                if cams:
+                    log_grad_cam(images, cams, epoch, stats)
+
+                # 1) Stem/First Layer：样本间特征余弦相似度
+                stem_act = grad_cam.activations.get("Stem_Conv1")
+                if stem_act is not None and stem_act.size(0) > 1:
+                    stem_feat = stem_act.mean(dim=(2, 3))  # (B, C)
+                    sim_mat = F.cosine_similarity(
+                        stem_feat.unsqueeze(1), stem_feat.unsqueeze(0), dim=-1
+                    )  # (B, B)
+                    mask = ~torch.eye(
+                        sim_mat.size(0), dtype=torch.bool, device=sim_mat.device
+                    )
+                    sim_vals = sim_mat[mask]
+                    if sim_vals.numel() > 0:
+                        wandb.log(
+                            {
+                                "CosSim/Stem_Sample_Mean": sim_vals.mean().item(),
+                                "CosSim/Stem_Sample_Std": sim_vals.std().item(),
+                            }
+                        )
+
+                # 2) Bottleneck（ASPP 输出）：相邻 epoch 特征余弦相似度
+                if epoch_state is not None:
+                    bott_act = grad_cam.activations.get("Bottleneck_ASPP")
+                    if bott_act is not None:
+                        cur_vec = bott_act.mean(dim=(0, 2, 3))  # (C,)
+                        prev_vec = epoch_state.get("prev_bottleneck")
+                        if prev_vec is not None:
+                            cs = F.cosine_similarity(cur_vec, prev_vec, dim=0).item()
+                            wandb.log(
+                                {"CosSim/Bottleneck_Epoch_to_prev": cs}
+                            )
+                        epoch_state["prev_bottleneck"] = cur_vec.detach()
+
+                # 2.5) CNN vs ViT 分支：全局特征余弦相似度（判断两条支路是否互补）
+                cnn_act = grad_cam.activations.get("Branch_CNN")
+                vit_act = grad_cam.activations.get("Branch_ViT")
+                if cnn_act is not None and vit_act is not None:
+                    # 通过 GAP 得到每个样本的全局特征向量
+                    cnn_feat = cnn_act.mean(dim=(2, 3))  # (B, Cc)
+                    vit_feat = vit_act.mean(dim=(2, 3))  # (B, Cv)
+                    Bc, Cc = cnn_feat.shape
+                    Bv, Cv = vit_feat.shape
+                    Bmin = min(Bc, Bv)
+                    if Bmin > 0:
+                        # 若通道数不同，先降维到相同维度
+                        Cmin = min(Cc, Cv)
+                        cf = cnn_feat[:Bmin, :Cmin]
+                        vf = vit_feat[:Bmin, :Cmin]
+                        cs = F.cosine_similarity(cf, vf, dim=1)  # (Bmin,)
+                        wandb.log(
+                            {
+                                "CosSim/Branch_CNN_vs_ViT_Mean": cs.mean().item(),
+                                "CosSim/Branch_CNN_vs_ViT_Std": cs.std().item()
+                                if cs.numel() > 1
+                                else 0.0,
+                            }
+                        )
+
+                # 3) 预测前一层：水体 vs 背景特征余弦相似度
+                pen_act = grad_cam.activations.get("Penultimate")
+                if pen_act is not None:
+                    with torch.no_grad():
+                        B, C, H, W = pen_act.shape
+                        feats = pen_act.permute(0, 2, 3, 1).reshape(-1, C)
+                        lbl_flat = labels.view(-1)
+                        water_mask = lbl_flat > 0
+                        back_mask = lbl_flat == 0
+                        if water_mask.any() and back_mask.any():
+                            wf = feats[water_mask]
+                            bf = feats[back_mask]
+                            max_samples = 20000
+                            if wf.size(0) > max_samples:
+                                idx = torch.randperm(wf.size(0), device=wf.device)[
+                                    :max_samples
+                                ]
+                                wf = wf[idx]
+                            if bf.size(0) > max_samples:
+                                idx = torch.randperm(bf.size(0), device=bf.device)[
+                                    :max_samples
+                                ]
+                                bf = bf[idx]
+                            w_mean = wf.mean(dim=0)
+                            b_mean = bf.mean(dim=0)
+                            cs = F.cosine_similarity(
+                                w_mean.unsqueeze(0), b_mean.unsqueeze(0), dim=-1
+                            ).item()
+                            wandb.log(
+                                {
+                                    "CosSim/Penultimate_Water_vs_Background": cs
+                                }
+                            )
+
+            except Exception as e:
+                logging.warning(f"Grad-CAM logging failed: {e}")
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) #梯度裁剪，防止梯度爆炸 #通过什么指标确认这个步骤是有用的
+        optimizer.step() #更新参数
+
+        if grad_cam is not None:
+            grad_cam.clear()
 
         total_loss += loss.item()
         seg_loss_total += loss.item()
+        bce_loss_total += loss_bce.item()
+        tversky_loss_total += loss_tversky.item()
         
         # Calculate metrics every 50 batches
         if (batch_idx + 1) % 50 == 0:
@@ -136,6 +273,8 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
     
     avg_loss = total_loss / len(train_loader)
     avg_seg_loss = seg_loss_total / len(train_loader)
+    avg_bce_loss = bce_loss_total / len(train_loader)
+    avg_tversky_loss = tversky_loss_total / len(train_loader)
     
     if metric_count > 0:
         iou /= metric_count
@@ -146,6 +285,8 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
     return (
         avg_loss,
         avg_seg_loss,
+        avg_bce_loss,
+        avg_tversky_loss,
         iou,
         precision,
         recall,
@@ -154,7 +295,7 @@ def train_one_epoch(model, train_loader, optimizer, loss_fc, device, epoch):
 
 def validate(model, val_loader, loss_fc, device, epoch):
     model.eval()
-    total_loss = seg_loss_total = 0.0
+    total_loss = seg_loss_total = bce_loss_total = tversky_loss_total = 0.0
     iou, precision, recall, f1 = 0.0, 0.0, 0.0, 0.0
 
     with torch.no_grad():
@@ -168,15 +309,24 @@ def validate(model, val_loader, loss_fc, device, epoch):
             seg_logits = model(images)
             if isinstance(seg_logits, list):
                 loss = 0
+                bce_loss_sum = 0
+                tversky_loss_sum = 0
                 for logits in seg_logits:
-                    loss += loss_fc(logits, labels)
+                    l, b, t = loss_fc(logits, labels)
+                    loss += l
+                    bce_loss_sum += b
+                    tversky_loss_sum += t
                 loss /= len(seg_logits)
+                loss_bce = bce_loss_sum / len(seg_logits)
+                loss_tversky = tversky_loss_sum / len(seg_logits)
                 seg_logits = seg_logits[0]
             else:
-                loss = loss_fc(seg_logits, labels)
+                loss, loss_bce, loss_tversky = loss_fc(seg_logits, labels)
 
             total_loss += loss.item()
             seg_loss_total += loss.item()
+            bce_loss_total += loss_bce.item()
+            tversky_loss_total += loss_tversky.item()
 
             outputs = torch.sigmoid(seg_logits).detach()
             cur_iou, cur_precision, cur_recall, cur_f1 = calculate_metrics(outputs, labels)
@@ -192,6 +342,8 @@ def validate(model, val_loader, loss_fc, device, epoch):
             )
     avg_loss = total_loss / len(val_loader)
     avg_seg_loss = seg_loss_total / len(val_loader)
+    avg_bce_loss = bce_loss_total / len(val_loader)
+    avg_tversky_loss = tversky_loss_total / len(val_loader)
     iou /= len(val_loader)
     precision /= len(val_loader)
     recall /= len(val_loader)
@@ -200,6 +352,8 @@ def validate(model, val_loader, loss_fc, device, epoch):
     return (
         avg_loss,
         avg_seg_loss,
+        avg_bce_loss,
+        avg_tversky_loss,
         iou,
         precision,
         recall,
@@ -263,6 +417,158 @@ def test(model, test_loader, loss_fc, device):
     )
 
 
+class GradCAM:
+    """通用 Grad-CAM 实现，可注册多个目标层。"""
+
+    def __init__(self, model, target_layers: dict):
+        """
+        Args:
+            model: 要可视化的模型
+            target_layers (dict[str, nn.Module]): 名称 -> 层对象
+        """
+        self.model = model
+        self.target_layers = target_layers
+        self.activations = {}
+        self.gradients = {}
+        self.handles = []
+        self._register_hooks()
+
+    def _register_hooks(self):
+        for name, layer in self.target_layers.items():
+            # 只使用 forward hook，并在其中给输出注册 Tensor 级别的 grad hook，
+            # 避免使用 register_full_backward_hook 引入的自定义 BackwardFunction
+            self.handles.append(
+                layer.register_forward_hook(self._make_forward_hook(name))
+            )
+
+    def _make_forward_hook(self, name):
+        def hook(module, inp, out):
+            # 保存前向激活
+            self.activations[name] = out.detach()
+
+            # 在输出 Tensor 上注册梯度 hook，保存反向梯度
+            def _grad_hook(grad):
+                self.gradients[name] = grad.detach()
+
+            if isinstance(out, torch.Tensor):
+                out.register_hook(_grad_hook)
+
+        return hook
+
+    def get_cam(self, layer_name, upsample_size=None):
+        """返回指定层的 Grad-CAM，shape: (B, H, W)。"""
+        acts = self.activations.get(layer_name)
+        grads = self.gradients.get(layer_name)
+        if acts is None or grads is None:
+            return None
+
+        # 1. GAP 得到通道权重
+        weights = grads.mean(dim=(2, 3), keepdim=True)  # (B, C, 1, 1)
+
+        # 2. 加权求和 -> (B, H, W)
+        cam = (weights * acts).sum(dim=1)  # (B, H, W)
+        cam = F.relu(cam)
+
+        # 3. 归一化到 [0, 1]
+        B, H, W = cam.shape
+        cam_flat = cam.view(B, -1)
+        cam_min = cam_flat.min(dim=1, keepdim=True)[0]
+        cam_max = cam_flat.max(dim=1, keepdim=True)[0]
+        cam_norm = (cam_flat - cam_min) / (cam_max - cam_min + 1e-8)
+        cam = cam_norm.view(B, H, W)
+
+        # 4. 上采样到输入分辨率
+        if upsample_size is not None and (H, W) != upsample_size:
+            cam = F.interpolate(
+                cam.unsqueeze(1),
+                size=upsample_size,
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(1)
+
+        return cam
+
+    def get_all(self, upsample_size=None):
+        cams = {}
+        for name in self.target_layers.keys():
+            cam = self.get_cam(name, upsample_size)
+            if cam is not None:
+                cams[name] = cam
+        return cams
+
+    def clear(self):
+        self.activations.clear()
+        self.gradients.clear()
+
+    def remove_hooks(self):
+        for h in self.handles:
+            h.remove()
+        self.handles = []
+
+
+def log_grad_cam(images, cams_dict, epoch, dataset_stats, num_samples=4):
+    """将多层 Grad-CAM 与输入图像一起可视化并记录到 wandb。
+
+    Args:
+        images (torch.Tensor): 输入图像 (B, C, H, W)，已标准化。
+        cams_dict (dict[str, torch.Tensor]): 名称 -> CAM (B, H, W)。
+        epoch (int): 当前 epoch。
+        dataset_stats (tuple): (mean, std) 用于反标准化。
+        num_samples (int): 可视化的样本数量。
+    """
+    try:
+        if not cams_dict:
+            return
+
+        images = images.detach().cpu()
+        num_samples = min(num_samples, images.shape[0])
+        if num_samples == 0:
+            return
+
+        # 反标准化输入，便于可视化
+        mean, std = dataset_stats
+        mean = mean.view(1, -1, 1, 1)
+        std = std.view(1, -1, 1, 1)
+        vis_images = images * std + mean
+        vis_images = vis_images[:, 0, :, :]  # 只看 VV 通道
+
+        layer_names = list(cams_dict.keys())
+        cams_cpu = {k: v.detach().cpu() for k, v in cams_dict.items()}
+        num_layers = len(layer_names)
+
+        fig, axes = plt.subplots(
+            num_samples,
+            1 + num_layers,
+            figsize=(4 * (1 + num_layers), 4 * num_samples),
+            constrained_layout=True,
+        )
+        if num_samples == 1:
+            axes = axes.reshape(1, -1)
+
+        for i in range(num_samples):
+            # 原图
+            ax0 = axes[i, 0]
+            ax0.imshow(vis_images[i], cmap="gray")
+            ax0.set_title(f"Sample {i+1} - Input")
+            ax0.axis("off")
+
+            # 不同层的 Grad-CAM 叠加
+            for j, name in enumerate(layer_names):
+                cam = cams_cpu[name][i]
+                ax = axes[i, j + 1]
+                ax.imshow(vis_images[i], cmap="gray")
+                ax.imshow(cam, cmap="jet", alpha=0.5)
+                ax.set_title(name)
+                ax.axis("off")
+
+        wandb.log({f"GradCAM/Epoch_{epoch}": wandb.Image(fig)})
+        plt.close(fig)
+
+    except Exception as e:
+        logging.warning(f"Could not generate Grad-CAM visualizations: {e}")
+        plt.close("all")
+
+
 def main():
     # 设置随机种子
     set_seed(config["seed"])
@@ -285,8 +591,9 @@ def main():
             num_workers=config["num_workers"],
             neg_sample_ratio=0.3,
             seed=config["seed"],
-            preload=True
+            preload=False
         )
+        #考虑从验证集中抽取部分数据作为可视化集
         vis_dataset = S1WaterDataset(
             data_dir=config["data_root"],
             split='vis',
@@ -308,6 +615,24 @@ def main():
         )
         model = model.to(device)
         wandb.watch(model, log="all", log_freq=100)
+
+        # Grad-CAM：监视多个关键层（包括 CNN / ViT 分支）
+        target_layers = {
+            # 编码器底层附近的卷积：使用 layer1[0].conv1（在当前 CNNEncoder 版本中始终存在）
+            "Stem_Conv1": model.cnn.layer1[0].conv1,
+            # CNN 分支：layer4 输出 (C4)
+            "Branch_CNN": model.cnn.layer4,
+            # ViT 分支：vit_down 输出 (与 C4 对齐)
+            "Branch_ViT": model.vit_down,
+            # 瓶颈层：ASPP 输出（全局上下文）
+            "Bottleneck_ASPP": model.aspp,
+            # 解码器最后两层上采样块
+            "Decoder_Dec3": model.dec3,
+            "Decoder_Dec2": model.dec2,
+            # 预测输出前一层：final_conv 中的 ReLU 输出 (32 通道)
+            "Penultimate": model.final_conv[2],
+        }
+        grad_cam = GradCAM(model, target_layers)
 
         # 计算并记录模型参数量
         total_params = sum(p.numel() for p in model.parameters())
@@ -338,7 +663,7 @@ def main():
         )
         scheduler = SequentialLR(
             optimizer,
-            schedulers=[warmup_scheduler, cosine_scheduler],
+            schedulers=[warmup_scheduler, cosine_scheduler],#两个阶段
             milestones=[config["warmup_epochs"]],
         )
         
@@ -378,16 +703,18 @@ def main():
         best_iou, report_iou = 0.0, 0.0
         best_epoch = -1
         best_model_path = os.path.join(checkpoint_dir, "best_model.pth")
-        loss_fc = MixedLoss(alpha=0.35, beta=0.65, weight_bce=0.4, weight_tversky=0.6).to(device)
+        loss_fc = MixedLoss(alpha=0.4, beta=0.6, weight_bce=0.5, weight_tversky=0.5).to(device)#loss的实例化
+        epoch_state = {"prev_bottleneck": None}
 
         for epoch in range(config["num_epochs"]):
             
-            train_loss, train_seg_loss, \
+            train_loss, train_seg_loss, train_bce_loss, train_tversky_loss, \
             train_iou, train_precision, train_recall, train_f1 = train_one_epoch(
-                model, train_loader, optimizer, loss_fc, device, epoch + 1
+                model, train_loader, optimizer, loss_fc, device, epoch + 1,
+                train_loader.dataset, grad_cam, epoch_state
             )
 
-            val_loss, val_seg_loss, \
+            val_loss, val_seg_loss, val_bce_loss, val_tversky_loss, \
             val_iou, val_precision, val_recall, val_f1 = validate(
                 model, val_loader, loss_fc, device, epoch + 1
             )
@@ -403,8 +730,12 @@ def main():
 
                     "Train_info/Loss/Train": train_loss,
                     "Train_info/Loss/Val": val_loss,
-                    "Train_info/Seg_Loss/Train": train_seg_loss,
-                    "Train_info/Seg_Loss/Val": val_seg_loss,
+                    #"Train_info/Seg_Loss/Train": train_seg_loss,
+                    #"Train_info/Seg_Loss/Val": val_seg_loss,
+                    "Train_info/BCE_Loss/Train": train_bce_loss,
+                    "Train_info/BCE_Loss/Val": val_bce_loss,
+                    "Train_info/Tversky_Loss/Train": train_tversky_loss,
+                    "Train_info/Tversky_Loss/Val": val_tversky_loss,
                     "Train_info/IoU/Train": train_iou,
                     "Train_info/IoU/Val": val_iou,
                     "Train_info/F1/Train": train_f1,

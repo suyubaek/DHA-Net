@@ -152,7 +152,7 @@ class ASPP(nn.Module):
     def forward(self, x):
         res = []
         for conv in self.convs:
-            res.append(conv(x))
+            res.append(conv(x)) #打点
         res = torch.cat(res, dim=1)
         return self.project(res)
 
@@ -173,19 +173,18 @@ class CNNEncoder(nn.Module):
         # Modify first layer for 2-channel input
         if in_channels != 3:
             old_conv = resnet.conv1
-            new_conv = nn.Conv2d(
+            self.stem_conv = nn.Conv2d(
                 in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False
             )
-
             # Initialize with first 'in_channels' of pretrained weights
             with torch.no_grad():
-                new_conv.weight.copy_(old_conv.weight[:, :in_channels, :, :])
-
-            self.stem = nn.Sequential(new_conv, resnet.bn1, resnet.relu, resnet.maxpool)
+                self.stem_conv.weight.copy_(old_conv.weight[:, :in_channels, :, :])
         else:
-            self.stem = nn.Sequential(
-                resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool
-            )
+            self.stem_conv = resnet.conv1
+
+        self.stem_bn = resnet.bn1
+        self.stem_relu = resnet.relu
+        self.stem_maxpool = resnet.maxpool
 
         self.layer1 = resnet.layer1  # 256
         self.layer2 = resnet.layer2  # 512
@@ -193,12 +192,15 @@ class CNNEncoder(nn.Module):
         self.layer4 = resnet.layer4  # 2048
 
     def forward(self, x):
-        x = self.stem(x)
+        s1 = self.stem_conv(x)
+        s2 = self.stem_relu(self.stem_bn(s1))
+        x = self.stem_maxpool(s2)
+        
         c1 = self.layer1(x)
         c2 = self.layer2(c1)
         c3 = self.layer3(c2)
         c4 = self.layer4(c3)
-        return c1, c2, c3, c4
+        return c1, c2, c3, c4, s1, s2
 
 
 class DeiTTiny(nn.Module):
@@ -524,7 +526,7 @@ class Model(nn.Module):
         self.vit_down = nn.Conv2d(192, 192, 3, stride=2, padding=1)  # 1/16 -> 1/32
 
         self.bottleneck_fusion = nn.Sequential(
-            nn.Conv2d(2048 + 192, 512, 1, bias=False),
+            nn.Conv2d(2048 + 192, 512, 1, bias=False), #降维到512
             nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
         )
@@ -554,7 +556,7 @@ class Model(nn.Module):
 
     def forward(self, x):
         # Encoders
-        c1, c2, c3, c4 = self.cnn(x)
+        c1, c2, c3, c4, s1, s2 = self.cnn(x)
         v = self.vit(x)  # 1/16
 
         # Fusion at Bottleneck
@@ -582,6 +584,8 @@ class Model(nn.Module):
         out = F.interpolate(d2, scale_factor=4, mode="bilinear", align_corners=True)
         out = self.final_conv(out)
 
+        if self.training:
+            return out, s1, s2
         return out
 
 

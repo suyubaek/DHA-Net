@@ -2,7 +2,7 @@ config = {
     'seed': 42,
     'device': 'cuda',
 
-    'data_root': '/mnt/data1/rove/dataset/S1_Water',
+    'data_root': '/mnt/data1/suyubaek/dataset/S1_Water_256',
     'batch_size': 96,
     'num_workers': 12,
 
@@ -16,7 +16,7 @@ config = {
     'learning_rate': 5e-4,
     'min_lr': 1e-6,
     'weight_decay': 1e-3,
-    'num_epochs': 300,
+    'num_epochs': 30,
     'warmup_epochs': 10,
 
     'save_dir': './runs'
